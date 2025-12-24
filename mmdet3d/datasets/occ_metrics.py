@@ -292,7 +292,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description='eval occupancy')
     parser.add_argument('pred_path', help='pred_path')
-    parser.add_argument('--gt_path', default='/mount/data/occupancy_cvpr2023/gts', help='checkpoint file')
+    parser.add_argument('--gt_path', default='/root/FB-BEV/data/nuscenes/gts', help='checkpoint file')
     parser.add_argument('--min_d', default=-1, type=int, help='min range')
     parser.add_argument('--max_d', default=100, type=int, help='max range')
     parser.add_argument(

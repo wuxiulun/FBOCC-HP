@@ -219,9 +219,9 @@ def collect_results_cpu(result_part, size, tmpdir=None):
                                 dtype=torch.uint8,
                                 device='cuda')
         if rank == 0:
-            mmcv.mkdir_or_exist('.dist_test')
+            mmcv.mkdir_or_exist('/root/autodl-tmp/.dist_test')
             prefix = str(time.time())[-5:]
-            tmpdir = tempfile.mkdtemp(dir='.dist_test', prefix=prefix)
+            tmpdir = tempfile.mkdtemp(dir='/root/autodl-tmp/.dist_test', prefix=prefix)
             tmpdir = torch.tensor(
                 bytearray(tmpdir.encode()), dtype=torch.uint8, device='cuda')
             dir_tensor[:len(tmpdir)] = tmpdir

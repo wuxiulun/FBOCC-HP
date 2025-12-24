@@ -31,6 +31,8 @@ except ImportError:
     from mmdet3d.utils import setup_multi_processes
 
 
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')
     parser.add_argument('config', help='train config file path')
@@ -118,6 +120,7 @@ def main():
     args = parse_args()
 
     cfg = Config.fromfile(args.config)
+    # print(f"***************cfg:{cfg}")
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
 

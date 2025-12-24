@@ -6,8 +6,8 @@
 
 
 # we follow the online training settings  from solofusion
-num_gpus = 16
-samples_per_gpu = 4
+num_gpus = 4
+samples_per_gpu = 3
 num_iters_per_epoch = int(28130 // (num_gpus * samples_per_gpu) * 4.554)
 num_epochs = 20
 checkpoint_epoch_interval = 1
@@ -117,7 +117,7 @@ model = dict(
     single_bev_num_channels=numC_Trans,
     readd=True,
     img_backbone=dict(
-        pretrained='ckpts/resnet50-0676ba61.pth',
+        # pretrained='ckpts/resnet50-0676ba61.pth',
         type='ResNet',
         depth=50,
         num_stages=4,
@@ -253,7 +253,8 @@ model = dict(
 dataset_type = 'NuScenesDataset'
 data_root = 'data/nuscenes/'
 file_client_args = dict(backend='disk')
-occupancy_path = '/mount/data/occupancy_cvpr2023/gts'
+# occupancy_path = '/mount/data/occupancy_cvpr2023/gts'
+occupancy_path = '/root/FB-BEV/data/nuscenes/gts'
 
 
 train_pipeline = [
