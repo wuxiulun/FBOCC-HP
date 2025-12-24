@@ -146,6 +146,24 @@ model = dict(
         loss_depth_weight=1.,
         use_dcn=False,
     ),
+
+    hardness_net=dict(
+        type='DepthAwareHardnessNet',
+        depth_channels=80,
+        context_channels=80,
+        mid_channels=512,
+        use_aspp=True,  # 使用ASPP多尺度感受野
+        use_3d_conv=False,  # 不使用3D卷积（与depth_net的use_dcn=False保持一致）
+        use_geometry_aware=True,  # 使用几何感知（复用depth_net的相机参数处理）
+        with_cp=use_checkpoint,  # 使用梯度检查点，与depth_net一致
+        temperature=0.1,  # 用于概率分布的softmax温度参数
+    ),
+    instance_fusion=dict(
+        type='MultiScaleInstanceFusionModule',
+        embed_dims=80,
+        with_cp=use_checkpoint,
+    ),
+
     forward_projection=dict(
         type='LSSViewTransformerFunction3D',
         grid_config=grid_config,
@@ -370,9 +388,10 @@ lr_config = dict(
 runner = dict(type='IterBasedRunner', max_iters=num_epochs * num_iters_per_epoch)
 checkpoint_config = dict(
     interval=checkpoint_epoch_interval * num_iters_per_epoch)
+# evaluation = dict(
+#     interval=20 * num_iters_per_epoch, pipeline=test_pipeline)
 evaluation = dict(
-    interval=20 * num_iters_per_epoch, pipeline=test_pipeline)
-
+    interval=1 * num_iters_per_epoch, pipeline=test_pipeline)
 
 log_config = dict(
     interval=50,

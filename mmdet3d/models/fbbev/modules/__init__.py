@@ -3,3 +3,6 @@ from .frpn import FRPN
 from .fpn3d import FPN3D
 from .resnet3d import CustomResNet3D
 from .occ_loss_utils import *
+from .HPNet import DepthAwareHardnessNet
+# from .Inst_Fuse import *
+from .inst_fuse_refine import *

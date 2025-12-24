@@ -55,6 +55,10 @@ class FBOCC(CenterPoint):
                  frpn=None,
                  # depth_net
                  depth_net=None,
+                 # HPNet
+                 hardness_net=None,
+                 # Instance_fusion
+                 instance_fusion=None,
                  # occupancy head
                  occupancy_head=None,
                  # other settings.
@@ -86,6 +90,14 @@ class FBOCC(CenterPoint):
 
         # Depth Net
         self.depth_net = builder.build_head(depth_net) if depth_net else None
+
+        # hardness_net
+        self.hardness_net = builder.build_head(hardness_net) if hardness_net else None
+
+        # instance_fusion
+        self.instance_fusion = builder.build_head(instance_fusion) if instance_fusion else None
+        self.history_instances = None  # 存储历史实例
+        self.is_first_frame = True  # 第一帧标志
 
         # Occupancy Head
         self.occupancy_head = builder.build_head(occupancy_head) if occupancy_head else None
@@ -316,7 +328,7 @@ class FBOCC(CenterPoint):
         """Extract features of images."""
 
         return_map = {}
-
+        mlp_input = None
         context = self.image_encoder(img[0])
         cam_params = img[1:7]
         if self.with_specific_component('depth_net'):
@@ -327,10 +339,15 @@ class FBOCC(CenterPoint):
         else:
             context=None
             depth=None
+
+        if self.with_specific_component('hardness_net'):
+            hardness = self.hardness_net(depth.detach(), context.detach(), mlp_input.detach())
+        kwargs['hardness'] = hardness
         
         if self.with_specific_component('forward_projection'):
-            bev_feat = self.forward_projection(cam_params, context, depth, **kwargs)
+            bev_feat, bev_hardness = self.forward_projection(cam_params, context, depth, **kwargs)
             return_map['cam_params'] = cam_params
+            return_map['bev_hardness'] = bev_hardness
         else:
             bev_feat = None
         
@@ -362,9 +379,17 @@ class FBOCC(CenterPoint):
 
         # Fuse History
         bev_feat = self.fuse_history(bev_feat, img_metas, img[6])
-        
-        bev_feat = self.bev_encoder(bev_feat)
-        return_map['img_bev_feat'] = bev_feat
+
+        if self.instance_fusion is not None:
+            bev_feat_inst_refined = self.process_instance_fusion(
+                bev_feat, context, bev_hardness.detach(), img_metas, return_map)
+
+        with torch.no_grad():
+            bev_feat = self.bev_encoder(bev_feat)
+            return_map['img_bev_feat'] = bev_feat
+
+        bev_feat_inst_refined = self.bev_encoder(bev_feat_inst_refined)
+        return_map['img_bev_feat_inst_refined'] = bev_feat_inst_refined
 
         return return_map
 
@@ -440,8 +465,13 @@ class FBOCC(CenterPoint):
             losses.update(losses_pts)
             
         if self.with_specific_component('occupancy_head'):
-            losses_occupancy = self.occupancy_head.forward_train(results['img_bev_feat'], results=results, gt_occupancy=kwargs['gt_occupancy'], gt_occupancy_flow=gt_occupancy_flow)
+            losses_occupancy = self.occupancy_head.forward_train(results['img_bev_feat'], results=results, gt_occupancy=kwargs['gt_occupancy'], gt_occupancy_flow=gt_occupancy_flow, mark=True)
             losses.update(losses_occupancy)
+            
+            losses_occupancy_refined = self.occupancy_head.forward_train(results['img_bev_feat_inst_refined'], results=results,
+                                                                 gt_occupancy=kwargs['gt_occupancy'],
+                                                                 gt_occupancy_flow=gt_occupancy_flow, mark=False)
+            losses.update(losses_occupancy_refined)
 
         if self.with_specific_component('frpn'):
             losses_mask = self.frpn.get_bev_mask_loss(kwargs['gt_bev_mask'], results['bev_mask_logit'])
@@ -527,7 +557,9 @@ class FBOCC(CenterPoint):
 
 
         if self.with_specific_component('occupancy_head'):
-            pred_occupancy = self.occupancy_head(results['img_bev_feat'], results=results, **kwargs)['output_voxels'][0]
+            #pred_occupancy = self.occupancy_head(results['img_bev_feat'], results=results, **kwargs)['output_voxels'][0]
+            pred_occupancy = self.occupancy_head(results['img_bev_feat_inst_refined'], results=results, **kwargs)['output_voxels'][0]
+
 
             pred_occupancy = pred_occupancy.permute(0, 2, 3, 4, 1)[0]
             if self.fix_void:
@@ -597,3 +629,80 @@ class FBOCC(CenterPoint):
         assert self.with_pts_bbox
         outs = self.pts_bbox_head(results['img_bev_feat'])
         return outs
+
+    @force_fp32()
+    def process_instance_fusion(self, bev_feat, context, bev_hardness, img_metas, return_map):
+        bs = bev_feat.shape[0]
+
+        B, C, H, W, D = bev_feat.shape
+
+        # 根据困难度筛选困难体素特征
+        if bev_hardness is not None:
+            # 将特征和困难度展平
+            hardness_flat = bev_hardness.reshape(B, -1, 1)  # [B, H*W*D, 1]
+            bev_feat_flat = bev_feat.permute(0, 2, 3, 4, 1).reshape(B, -1, C)  # [B, H*W*D, C]
+
+            # 选择困难度最高的N个体素
+            topk_hardness, topk_indices = torch.topk(
+                hardness_flat.squeeze(-1),
+                k=min(1500, hardness_flat.shape[1]),
+                dim=1
+            )
+
+            # 提取初始困难体素特征
+            initial_hard_voxel_feat = torch.gather(
+                bev_feat_flat,
+                dim=1,
+                index=topk_indices.unsqueeze(-1).expand(-1, -1, C)
+            )  # [B, M, C]
+
+        else:
+            enhanced_hard_voxel_feat = None
+            bev_feat_flat = None
+            topk_indices = None
+
+        # 处理历史实例（保持不变）
+        start_of_sequence = torch.BoolTensor([
+            single_img_metas['start_of_sequence']
+            for single_img_metas in img_metas]).to(bev_feat.device)
+
+        if self.history_instances is None:
+            self.history_instances = self.instance_fusion.history_inst_embed.weight.unsqueeze(0).repeat(bs, 1, 1)
+
+        if start_of_sequence.sum() > 0:
+            reset_instances = self.instance_fusion.history_inst_embed.weight.unsqueeze(0).repeat(
+                start_of_sequence.sum(), 1, 1)
+            self.history_instances[start_of_sequence] = reset_instances
+
+        history_inst_queries = self.history_instances.clone()
+
+        # 实例融合 - 梯度保持
+        fused_global_inst, updated_history_inst, final_enhanced_voxel, camera_instances = self.instance_fusion(
+            context=context,
+            hard_voxel_feat=initial_hard_voxel_feat,
+            history_inst_queries=history_inst_queries
+        )
+
+        self.history_instances = updated_history_inst.detach()
+
+        # 关键修改：梯度保持的特征替换
+        if final_enhanced_voxel is not None and initial_hard_voxel_feat is not None:
+            # scatter操作
+            bev_feat_flat_combined = bev_feat_flat.scatter(
+                dim=1,
+                index=topk_indices.unsqueeze(-1).expand(-1, -1, C),
+                src=final_enhanced_voxel
+            )
+
+            bev_feat_reshaped = bev_feat_flat_combined.reshape(B, H, W, D, C)
+            bev_feat_refined = bev_feat_reshaped.permute(0, 4, 1, 2, 3)
+        else:
+            bev_feat_refined = bev_feat
+
+        # 保存结果
+        return_map['fused_global_instances'] = fused_global_inst
+        return_map['camera_instances'] = camera_instances
+        return_map['updated_history_instances'] = updated_history_inst
+        return_map['hard_voxel_indices'] = topk_indices if bev_hardness is not None else None
+
+        return bev_feat_refined

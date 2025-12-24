@@ -19,6 +19,7 @@ from torch.utils.checkpoint import checkpoint as cp
 from mmcv.runner import BaseModule, force_fp32
 from torch.cuda.amp import autocast
 from mmdet3d.models import builder
+from mmdet3d.models.fbbev.modules.occ_loss_utils import LossDistributionCalculator, HPNSupervisionLoss
 
 @HEADS.register_module()
 class OccHead(BaseModule):
@@ -201,11 +202,20 @@ class OccHead(BaseModule):
     
     @force_fp32()
     def forward_train(self, voxel_feats, img_feats=None, pts_feats=None, transform=None, gt_occupancy=None, gt_occupancy_flow=None, **kwargs):
-        res = self.forward(voxel_feats, img_feats=img_feats, pts_feats=pts_feats, transform=transform, **kwargs)
-        loss = self.loss(target_voxels=gt_occupancy,
-            output_voxels = res['output_voxels'],
-            output_coords_fine=res['output_coords_fine'],
-            output_voxels_fine=res['output_voxels_fine'])
+        mark = kwargs.get('mark', None)
+        if mark:
+            with torch.no_grad():
+                res = self.forward(voxel_feats, img_feats=img_feats, pts_feats=pts_feats, transform=transform, **kwargs)
+            results = kwargs.get('results', None)
+            loss = self.enhanced_loss(output_voxels=res['output_voxels'], hardness_pred=results['bev_hardness'],
+                                      target_voxels=gt_occupancy)
+
+        else:
+            res = self.forward(voxel_feats, img_feats=img_feats, pts_feats=pts_feats, transform=transform, **kwargs)
+            loss = self.loss(target_voxels=gt_occupancy,
+                output_voxels = res['output_voxels'],
+                output_coords_fine=res['output_coords_fine'],
+                output_voxels_fine=res['output_voxels_fine'])
 
         return loss
 
@@ -262,5 +272,146 @@ class OccHead(BaseModule):
                 target_voxels=None, visible_mask=None, **kwargs):
         loss_dict = {}
         for index, output_voxel in enumerate(output_voxels):
-            loss_dict.update(self.loss_voxel(output_voxel, target_voxels,  tag='c_{}'.format(index)))
+            loss_dict.update(self.loss_voxel(output_voxel, target_voxels,  tag='refined_{}'.format(index)))
         return loss_dict
+
+    @force_fp32()
+    def enhanced_loss(self, output_voxels=None, hardness_pred=None, target_voxels=None, **kwargs):
+        """
+        增强的loss函数，包含HPNet监督
+        """
+        loss_dict = {}
+
+        # # 1. 原有的occupancy loss
+        # for index, output_voxel in enumerate(output_voxels):
+        #     loss_dict.update(self.loss_voxel(output_voxel, target_voxels, tag='c_{}'.format(index)))
+
+        # 2. HPNet监督loss
+        if hardness_pred is not None and len(output_voxels) > 0:
+            # 计算真实的loss分布和有效掩码
+            loss_calculator = LossDistributionCalculator(
+                use_focal_loss=self.use_focal_loss,
+                class_weights=self.class_weights,
+                empty_idx=self.empty_idx
+            )
+
+            # 计算loss分布和有效掩码
+            with torch.no_grad():
+                true_loss_dist, valid_mask = loss_calculator(output_voxels[0].detach(), target_voxels)
+
+            # 将hardness_pred上采样到真实loss分布的分辨率
+            B, H_true, W_true, D_true = true_loss_dist.shape  # [B, 200, 200, 16]
+
+            # 使用三线性插值上采样
+            hardness_pred_upsampled = F.interpolate(
+                hardness_pred.unsqueeze(1),  # 添加通道维度 [B, 1, 100, 100, 8]
+                size=(H_true, W_true, D_true),
+                mode='trilinear',
+                align_corners=False
+            ).squeeze(1)  # [B, 200, 200, 16]
+
+            # 计算HPNet监督loss（传入有效掩码）
+            hp_supervision_loss = HPNSupervisionLoss(
+                loss_type='top1_percent_focus',
+                temperature=0.1,
+                weight=10.0
+            )
+
+            loss_hp = hp_supervision_loss(hardness_pred_upsampled, true_loss_dist, valid_mask)
+            loss_dict['loss_hp_supervision'] = loss_hp
+
+            # 监控信息（使用上采样后的hardness）
+            valid_hardness = hardness_pred_upsampled[valid_mask].flatten()
+            valid_loss = true_loss_dist[valid_mask].flatten()
+
+            print(f"Hardness range: [{valid_hardness.min():.3f}, {valid_hardness.max():.3f}]")
+            print(f"Hardness mean: {valid_hardness.mean():.3f}")
+            print(f"Loss range: [{valid_loss.min():.3f}, {valid_loss.max():.3f}]")
+            print(f"Loss mean: {valid_loss.mean():.3f}")
+
+            # 统计前N名
+            if len(valid_hardness) > 1500:
+                hardness_sorted, _ = torch.sort(valid_hardness, descending=True)
+                loss_sorted, _ = torch.sort(valid_loss, descending=True)
+                print(f"Hardness 第1500名: {hardness_sorted[1499]:.3f}")
+                print(f"Loss 第1500名: {loss_sorted[1499]:.3f}")
+            else:
+                print(f"有效区域不足1500个: {len(valid_hardness)}")
+
+            # 计算相关性（使用所有有效点）
+            valid_hardness = hardness_pred_upsampled[valid_mask].flatten()
+            valid_loss = true_loss_dist[valid_mask].flatten()
+
+            # 使用所有有效点计算相关性
+            if len(valid_hardness) >= 2:
+                # 皮尔逊相关性
+                correlation_matrix = torch.corrcoef(torch.stack([valid_hardness, valid_loss]))
+                correlation = correlation_matrix[0, 1].item()
+
+                # 斯皮尔曼相关性
+                spearman_corr = self.spearman_correlation_efficient_direct(valid_hardness, valid_loss)
+
+                print(f"皮尔逊相关性(全部{len(valid_hardness)}个有效点): {correlation:.3f}")
+                print(f"斯皮尔曼相关性(全部{len(valid_hardness)}个有效点): {spearman_corr:.3f}")
+
+                # 额外统计：高loss区域的相关性（前10%）
+                if len(valid_hardness) >= 10:
+                    k = max(1000, len(valid_hardness) // 100)  # 至少1000个点，最多前10%
+
+                    # 按loss值排序，取前k个
+                    topk_loss, topk_indices = torch.topk(valid_loss, k)
+                    topk_hardness = valid_hardness[topk_indices]
+
+                    # 计算高loss区域的相关性
+                    high_loss_correlation_matrix = torch.corrcoef(torch.stack([topk_hardness, topk_loss]))
+                    high_loss_correlation = high_loss_correlation_matrix[0, 1].item()
+
+                    high_loss_spearman = self.spearman_correlation_efficient_direct(topk_hardness, topk_loss)
+
+                    print(f"高loss区域皮尔逊相关性(前{k}个): {high_loss_correlation:.3f}")
+                    print(f"高loss区域斯皮尔曼相关性(前{k}个): {high_loss_spearman:.3f}")
+
+            if len(valid_hardness) >= 100:  # 至少100个点才能计算1%
+                n_total = len(valid_hardness)
+                k_1percent = max(1, n_total // 100)  # 前1%的数量
+
+                # 获取前1%预测困难度的索引
+                _, top1_hardness_indices = torch.topk(valid_hardness, k_1percent)
+
+                # 获取前1%真实loss的索引
+                _, top1_loss_indices = torch.topk(valid_loss, k_1percent)
+
+                # 转换为集合以便计算交集
+                top1_hardness_set = set(top1_hardness_indices.cpu().numpy())
+                top1_loss_set = set(top1_loss_indices.cpu().numpy())
+
+                # 计算交集
+                intersection_set = top1_hardness_set & top1_loss_set
+                n_intersection = len(intersection_set)
+
+                # 计算各种指标
+                # 1. 精确率：预测为困难的体素中，真正是困难的比例
+                precision = n_intersection / k_1percent if k_1percent > 0 else 0
+
+                # 4. Jaccard相似度（IoU）
+                union_set = top1_hardness_set | top1_loss_set
+                jaccard_similarity = n_intersection / len(union_set) if len(union_set) > 0 else 0
+
+                print(f"=== 前1%重叠统计 ===")
+                print(f"交集数量: {n_intersection}")
+                print(f"精确率(预测前1%中真实前1%的比例): {precision:.3f}")
+                print(f"Jaccard相似度(IoU): {jaccard_similarity:.3f}")
+        return loss_dict
+
+    def spearman_correlation_efficient_direct(self, x, y):
+        """直接计算两个一维张量的斯皮尔曼相关性"""
+        n = x.shape[0]
+        if n < 2:
+            return 0.0
+
+        x_ranks = torch.argsort(torch.argsort(x))
+        y_ranks = torch.argsort(torch.argsort(y))
+
+        corr_matrix = torch.corrcoef(torch.stack([x_ranks.float(), y_ranks.float()]))
+        return corr_matrix[0, 1].item()
+

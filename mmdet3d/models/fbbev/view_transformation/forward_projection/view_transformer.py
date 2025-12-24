@@ -517,7 +517,7 @@ class LSSViewTransformerFunction3D(BaseModule):
         self.interval_starts = interval_starts.int().contiguous()
         self.interval_lengths = interval_lengths.int().contiguous()
 
-    def voxel_pooling_v2(self, coor, depth, feat):
+    def voxel_pooling_v2(self, coor, depth, feat, hardness):
         ranks_bev, ranks_depth, ranks_feat, \
             interval_starts, interval_lengths = \
             self.voxel_pooling_prepare_v2(coor)
@@ -541,7 +541,43 @@ class LSSViewTransformerFunction3D(BaseModule):
                                interval_lengths)
         bev_feat = bev_feat.permute(0, 1, 3, 4, 2) # B, C, Z, X, Y- > B, C, X, Y, Z
         # bev_feat = torch.cat(bev_feat.unbind(dim=2), 1)
-        return bev_feat
+        
+        B, N, D, H, W = hardness.shape
+
+        # 步骤1: 创建全1的特征张量用于计数
+        feat_ones = torch.ones((B, N, H, W, 1),
+                               dtype=hardness.dtype,
+                               device=hardness.device)
+        # 步骤2: 创建全1的计数张量
+        count_ones = torch.ones_like(hardness)  # (B, N, D, H, W)
+        # 步骤3: 定义BEV形状
+        bev_feat_hardness_shape = (B,
+                          int(self.grid_size[2]),  # Z
+                          int(self.grid_size[1]),  # Y
+                          int(self.grid_size[0]),  # X
+                          1)  # (B, Z, Y, X, 1)
+        bev_hardness_sum = bev_pool_v2(
+            hardness,  # 作为"深度"输入
+            feat_ones,  # 全1特征
+            ranks_depth, ranks_feat, ranks_bev,
+            bev_feat_hardness_shape, interval_starts, interval_lengths
+        )
+
+        # 步骤5: 投影计数
+        bev_hardness_count = bev_pool_v2(
+            count_ones,  # 全1深度
+            feat_ones,  # 全1特征
+            ranks_depth, ranks_feat, ranks_bev,
+            bev_feat_hardness_shape, interval_starts, interval_lengths
+        )
+
+        # 步骤6: 计算平均值
+        bev_hardness = bev_hardness_sum / (bev_hardness_count + 1e-8)
+
+        # 步骤7: 调整维度顺序
+        bev_hardness = bev_hardness.squeeze(1).permute(0, 2, 3, 1).contiguous()
+
+        return bev_feat, bev_hardness
 
     def voxel_pooling_prepare_v2(self, coor):
         """Data preparation for voxel pooling.
@@ -609,7 +645,7 @@ class LSSViewTransformerFunction3D(BaseModule):
             self.init_acceleration_v2(coor)
             self.initial_flag = False
 
-    def view_transform_core(self, cam_params, depth, tran_feat):
+    def view_transform_core(self, cam_params, depth, tran_feat, hardness):
        #  B, N, C, H, W = input[0].shape
 
         # Lift-Splat
@@ -628,18 +664,18 @@ class LSSViewTransformerFunction3D(BaseModule):
             bev_feat = bev_feat.squeeze(2)
         else:
             coor = self.get_lidar_coor(*cam_params)
-            bev_feat = self.voxel_pooling_v2(
+            bev_feat, bev_hardness = self.voxel_pooling_v2(
                 coor, depth,
-                tran_feat)
-        return bev_feat
+                tran_feat, hardness)
+        return bev_feat, bev_hardness
 
 
 
-    def view_transform(self, cam_params, depth, tran_feat):
+    def view_transform(self, cam_params, depth, tran_feat, hardness):
         if self.accelerate:
             self.pre_compute(cam_params)
 
-        return self.view_transform_core(cam_params, depth, tran_feat)
+        return self.view_transform_core(cam_params, depth, tran_feat, hardness)
 
     # @run_time('lss3d')
     def forward(self, cam_params, context, depth, **kwargs):
@@ -652,11 +688,15 @@ class LSSViewTransformerFunction3D(BaseModule):
         Returns:
             torch.tensor: Bird-eye-view feature in shape (B, C, H_BEV, W_BEV)
         """
-        bev = self.view_transform(cam_params, depth, context)
+        hardness = kwargs.get('hardness', None)
+
+        bev, bev_hardness = self.view_transform(cam_params, depth, context, hardness)
+
+
         if self.extra_relu:
-            return bev.relu()
+            return bev.relu(), bev_hardness
         else:
-            return bev 
+            return bev, bev_hardness
 
     def get_mlp_input(self, rot, tran, intrin, post_rot, post_tran, bda):
         return None
