@@ -557,7 +557,7 @@ class FBOCC(CenterPoint):
 
 
         if self.with_specific_component('occupancy_head'):
-            #pred_occupancy = self.occupancy_head(results['img_bev_feat'], results=results, **kwargs)['output_voxels'][0]
+            # pred_occupancy = self.occupancy_head(results['img_bev_feat'], results=results, **kwargs)['output_voxels'][0]
             pred_occupancy = self.occupancy_head(results['img_bev_feat_inst_refined'], results=results, **kwargs)['output_voxels'][0]
 
 

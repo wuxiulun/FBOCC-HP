@@ -7,7 +7,7 @@
 
 # we follow the online training settings  from solofusion
 num_gpus = 4
-samples_per_gpu = 3
+samples_per_gpu = 2
 num_iters_per_epoch = int(28130 // (num_gpus * samples_per_gpu) * 4.554)
 num_epochs = 20
 checkpoint_epoch_interval = 1
@@ -70,7 +70,7 @@ bda_aug_conf = dict(
     flip_dx_ratio=0.5,
     flip_dy_ratio=0.5)
 
-use_checkpoint = True
+use_checkpoint = False
 sync_bn = True
 
 
