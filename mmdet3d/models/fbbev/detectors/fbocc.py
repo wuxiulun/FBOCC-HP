@@ -59,6 +59,8 @@ class FBOCC(CenterPoint):
                  hardness_net=None,
                  # Instance_fusion
                  instance_fusion=None,
+                 #scene_hpnet
+                 scene_hpnet=None,
                  # occupancy head
                  occupancy_head=None,
                  # other settings.
@@ -98,6 +100,9 @@ class FBOCC(CenterPoint):
         self.instance_fusion = builder.build_head(instance_fusion) if instance_fusion else None
         self.history_instances = None  # 存储历史实例
         self.is_first_frame = True  # 第一帧标志
+
+        #scene_hpnet
+        self.scene_hpnet = builder.build_head(scene_hpnet) if scene_hpnet else None
 
         # Occupancy Head
         self.occupancy_head = builder.build_head(occupancy_head) if occupancy_head else None
@@ -380,6 +385,10 @@ class FBOCC(CenterPoint):
         # Fuse History
         bev_feat = self.fuse_history(bev_feat, img_metas, img[6])
 
+        if self.scene_hpnet is not None:
+            scene_hardness = self.scene_hpnet(bev_feat.detach())
+            return_map['scene_hardness'] = scene_hardness
+
         if self.instance_fusion is not None:
             bev_feat_inst_refined = self.process_instance_fusion(
                 bev_feat, context, bev_hardness.detach(), img_metas, return_map)
@@ -557,7 +566,7 @@ class FBOCC(CenterPoint):
 
 
         if self.with_specific_component('occupancy_head'):
-            # pred_occupancy = self.occupancy_head(results['img_bev_feat'], results=results, **kwargs)['output_voxels'][0]
+            #pred_occupancy = self.occupancy_head(results['img_bev_feat'], results=results, **kwargs)['output_voxels'][0]
             pred_occupancy = self.occupancy_head(results['img_bev_feat_inst_refined'], results=results, **kwargs)['output_voxels'][0]
 
 
@@ -645,7 +654,7 @@ class FBOCC(CenterPoint):
             # 选择困难度最高的N个体素
             topk_hardness, topk_indices = torch.topk(
                 hardness_flat.squeeze(-1),
-                k=min(1500, hardness_flat.shape[1]),
+                k=min(2000, hardness_flat.shape[1]),
                 dim=1
             )
 

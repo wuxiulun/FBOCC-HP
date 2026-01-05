@@ -188,7 +188,7 @@ class HPNSupervisionLoss(nn.Module):
 
             # 创建权重图：前1%区域权重为50，其他区域权重为1
             weight_map = torch.ones_like(true_valid)
-            weight_map[topk_indices] = 50.0  # 给前1%区域50倍权重
+            weight_map[topk_indices] = 25.0  # 给前1%区域50倍权重
 
             # 计算加权损失
             loss = (weight_map * (pred_normalized - true_normalized).abs()).mean()

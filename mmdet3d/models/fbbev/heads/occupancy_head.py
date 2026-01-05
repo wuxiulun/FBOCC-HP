@@ -207,7 +207,7 @@ class OccHead(BaseModule):
             with torch.no_grad():
                 res = self.forward(voxel_feats, img_feats=img_feats, pts_feats=pts_feats, transform=transform, **kwargs)
             results = kwargs.get('results', None)
-            loss = self.enhanced_loss(output_voxels=res['output_voxels'], hardness_pred=results['bev_hardness'],
+            loss = self.enhanced_loss(output_voxels=res['output_voxels'], hardness_pred=results['bev_hardness'], scene_hardness_pred=results['scene_hardness'],
                                       target_voxels=gt_occupancy)
 
         else:
@@ -276,7 +276,7 @@ class OccHead(BaseModule):
         return loss_dict
 
     @force_fp32()
-    def enhanced_loss(self, output_voxels=None, hardness_pred=None, target_voxels=None, **kwargs):
+    def enhanced_loss(self, output_voxels=None, hardness_pred=None, scene_hardness_pred=None, target_voxels=None, **kwargs):
         """
         增强的loss函数，包含HPNet监督
         """
@@ -310,97 +310,172 @@ class OccHead(BaseModule):
                 align_corners=False
             ).squeeze(1)  # [B, 200, 200, 16]
 
+            scene_hardness_pred_upsampled = F.interpolate(
+                scene_hardness_pred.unsqueeze(1),  # 添加通道维度 [B, 1, 100, 100, 8]
+                size=(H_true, W_true, D_true),
+                mode='trilinear',
+                align_corners=False
+            ).squeeze(1)  # [B, 200, 200, 16]
+
             # 计算HPNet监督loss（传入有效掩码）
             hp_supervision_loss = HPNSupervisionLoss(
                 loss_type='top1_percent_focus',
                 temperature=0.1,
-                weight=10.0
+                weight=5.0
             )
 
             loss_hp = hp_supervision_loss(hardness_pred_upsampled, true_loss_dist, valid_mask)
             loss_dict['loss_hp_supervision'] = loss_hp
 
-            # 监控信息（使用上采样后的hardness）
-            valid_hardness = hardness_pred_upsampled[valid_mask].flatten()
-            valid_loss = true_loss_dist[valid_mask].flatten()
+            loss_scene_hp = hp_supervision_loss(scene_hardness_pred_upsampled, true_loss_dist, valid_mask)
+            loss_dict['loss_scene_hp_supervision'] = loss_scene_hp
 
-            print(f"Hardness range: [{valid_hardness.min():.3f}, {valid_hardness.max():.3f}]")
-            print(f"Hardness mean: {valid_hardness.mean():.3f}")
-            print(f"Loss range: [{valid_loss.min():.3f}, {valid_loss.max():.3f}]")
-            print(f"Loss mean: {valid_loss.mean():.3f}")
+            if str(hardness_pred_upsampled.device) == 'cuda:0':
+                # 监控信息（使用上采样后的hardness）
+                valid_scene_hardness = scene_hardness_pred_upsampled[valid_mask].flatten()
+                valid_hardness = hardness_pred_upsampled[valid_mask].flatten()
+                valid_loss = true_loss_dist[valid_mask].flatten()
 
-            # 统计前N名
-            if len(valid_hardness) > 1500:
-                hardness_sorted, _ = torch.sort(valid_hardness, descending=True)
-                loss_sorted, _ = torch.sort(valid_loss, descending=True)
-                print(f"Hardness 第1500名: {hardness_sorted[1499]:.3f}")
-                print(f"Loss 第1500名: {loss_sorted[1499]:.3f}")
-            else:
-                print(f"有效区域不足1500个: {len(valid_hardness)}")
+                print(f"scnen Hardness range: [{valid_scene_hardness.min():.3f}, {valid_scene_hardness.max():.3f}]")
+                print(f"scene Hardness mean: {valid_scene_hardness.mean():.3f}")
+                print(f"Hardness range: [{valid_hardness.min():.3f}, {valid_hardness.max():.3f}]")
+                print(f"Hardness mean: {valid_hardness.mean():.3f}")
+                print(f"Loss range: [{valid_loss.min():.3f}, {valid_loss.max():.3f}]")
+                print(f"Loss mean: {valid_loss.mean():.3f}")
 
-            # 计算相关性（使用所有有效点）
-            valid_hardness = hardness_pred_upsampled[valid_mask].flatten()
-            valid_loss = true_loss_dist[valid_mask].flatten()
+                # 统计前N名
+                if len(valid_hardness) > 3000:
+                    scene_hardness_sorted, _ = torch.sort(valid_scene_hardness, descending=True)
+                    hardness_sorted, _ = torch.sort(valid_hardness, descending=True)
+                    loss_sorted, _ = torch.sort(valid_loss, descending=True)
+                    print(f"scene Hardness 第3000名: {scene_hardness_sorted[2999]:.3f}")
+                    print(f"Hardness 第3000名: {hardness_sorted[2999]:.3f}")
+                    print(f"Loss 第3000名: {loss_sorted[2999]:.3f}")
+                else:
+                    print(f"有效区域不足3000个: {len(valid_hardness)}")
 
-            # 使用所有有效点计算相关性
-            if len(valid_hardness) >= 2:
-                # 皮尔逊相关性
-                correlation_matrix = torch.corrcoef(torch.stack([valid_hardness, valid_loss]))
-                correlation = correlation_matrix[0, 1].item()
+                # 使用所有有效点计算相关性
+                if len(valid_hardness) >= 2:
+                    # 皮尔逊相关性
+                    correlation_matrix = torch.corrcoef(torch.stack([valid_hardness, valid_loss]))
+                    correlation = correlation_matrix[0, 1].item()
 
-                # 斯皮尔曼相关性
-                spearman_corr = self.spearman_correlation_efficient_direct(valid_hardness, valid_loss)
+                    # 斯皮尔曼相关性
+                    spearman_corr = self.spearman_correlation_efficient_direct(valid_hardness, valid_loss)
 
-                print(f"皮尔逊相关性(全部{len(valid_hardness)}个有效点): {correlation:.3f}")
-                print(f"斯皮尔曼相关性(全部{len(valid_hardness)}个有效点): {spearman_corr:.3f}")
+                    print(f"皮尔逊相关性(全部{len(valid_hardness)}个有效点): {correlation:.3f}")
+                    print(f"斯皮尔曼相关性(全部{len(valid_hardness)}个有效点): {spearman_corr:.3f}")
 
-                # 额外统计：高loss区域的相关性（前10%）
-                if len(valid_hardness) >= 10:
-                    k = max(1000, len(valid_hardness) // 100)  # 至少1000个点，最多前10%
+                    # 额外统计：高loss区域的相关性（前1%）
+                    if len(valid_hardness) >= 10:
+                        k = max(1000, len(valid_hardness) // 100)  # 至少1000个点，最多前1%
 
-                    # 按loss值排序，取前k个
-                    topk_loss, topk_indices = torch.topk(valid_loss, k)
-                    topk_hardness = valid_hardness[topk_indices]
+                        # 按loss值排序，取前k个
+                        topk_loss, topk_indices = torch.topk(valid_loss, k)
+                        topk_hardness = valid_hardness[topk_indices]
 
-                    # 计算高loss区域的相关性
-                    high_loss_correlation_matrix = torch.corrcoef(torch.stack([topk_hardness, topk_loss]))
-                    high_loss_correlation = high_loss_correlation_matrix[0, 1].item()
+                        # 计算高loss区域的相关性
+                        high_loss_correlation_matrix = torch.corrcoef(torch.stack([topk_hardness, topk_loss]))
+                        high_loss_correlation = high_loss_correlation_matrix[0, 1].item()
 
-                    high_loss_spearman = self.spearman_correlation_efficient_direct(topk_hardness, topk_loss)
+                        high_loss_spearman = self.spearman_correlation_efficient_direct(topk_hardness, topk_loss)
 
-                    print(f"高loss区域皮尔逊相关性(前{k}个): {high_loss_correlation:.3f}")
-                    print(f"高loss区域斯皮尔曼相关性(前{k}个): {high_loss_spearman:.3f}")
+                        print(f"高loss区域皮尔逊相关性(前{k}个): {high_loss_correlation:.3f}")
+                        print(f"高loss区域斯皮尔曼相关性(前{k}个): {high_loss_spearman:.3f}")
 
-            if len(valid_hardness) >= 100:  # 至少100个点才能计算1%
-                n_total = len(valid_hardness)
-                k_1percent = max(1, n_total // 100)  # 前1%的数量
+                if len(valid_hardness) >= 100:  # 至少100个点才能计算1%
+                    n_total = len(valid_hardness)
+                    k_1percent = max(1, n_total // 100)  # 前1%的数量
 
-                # 获取前1%预测困难度的索引
-                _, top1_hardness_indices = torch.topk(valid_hardness, k_1percent)
+                    # 获取前1%预测困难度的索引
+                    _, top1_hardness_indices = torch.topk(valid_hardness, k_1percent)
 
-                # 获取前1%真实loss的索引
-                _, top1_loss_indices = torch.topk(valid_loss, k_1percent)
+                    # 获取前1%真实loss的索引
+                    _, top1_loss_indices = torch.topk(valid_loss, k_1percent)
 
-                # 转换为集合以便计算交集
-                top1_hardness_set = set(top1_hardness_indices.cpu().numpy())
-                top1_loss_set = set(top1_loss_indices.cpu().numpy())
+                    # 转换为集合以便计算交集
+                    top1_hardness_set = set(top1_hardness_indices.cpu().numpy())
+                    top1_loss_set = set(top1_loss_indices.cpu().numpy())
 
-                # 计算交集
-                intersection_set = top1_hardness_set & top1_loss_set
-                n_intersection = len(intersection_set)
+                    # 计算交集
+                    intersection_set = top1_hardness_set & top1_loss_set
+                    n_intersection = len(intersection_set)
 
-                # 计算各种指标
-                # 1. 精确率：预测为困难的体素中，真正是困难的比例
-                precision = n_intersection / k_1percent if k_1percent > 0 else 0
+                    # 计算各种指标
+                    # 1. 精确率：预测为困难的体素中，真正是困难的比例
+                    precision = n_intersection / k_1percent if k_1percent > 0 else 0
 
-                # 4. Jaccard相似度（IoU）
-                union_set = top1_hardness_set | top1_loss_set
-                jaccard_similarity = n_intersection / len(union_set) if len(union_set) > 0 else 0
+                    # 4. Jaccard相似度（IoU）
+                    union_set = top1_hardness_set | top1_loss_set
+                    jaccard_similarity = n_intersection / len(union_set) if len(union_set) > 0 else 0
 
-                print(f"=== 前1%重叠统计 ===")
-                print(f"交集数量: {n_intersection}")
-                print(f"精确率(预测前1%中真实前1%的比例): {precision:.3f}")
-                print(f"Jaccard相似度(IoU): {jaccard_similarity:.3f}")
+                    print(f"=== 前1%重叠统计 ===")
+                    print(f"交集数量: {n_intersection}")
+                    print(f"精确率(预测前1%中真实前1%的比例): {precision:.3f}")
+                    print(f"Jaccard相似度(IoU): {jaccard_similarity:.3f}")
+
+
+
+
+                # 使用所有有效点计算相关性
+                if len(valid_scene_hardness) >= 2:
+                    # 皮尔逊相关性
+                    correlation_matrix = torch.corrcoef(torch.stack([valid_scene_hardness, valid_loss]))
+                    correlation = correlation_matrix[0, 1].item()
+
+                    # 斯皮尔曼相关性
+                    spearman_corr = self.spearman_correlation_efficient_direct(valid_scene_hardness, valid_loss)
+
+                    print(f"场景级皮尔逊相关性(全部{len(valid_scene_hardness)}个有效点): {correlation:.3f}")
+                    print(f"场景级斯皮尔曼相关性(全部{len(valid_scene_hardness)}个有效点): {spearman_corr:.3f}")
+
+                    # 额外统计：高loss区域的相关性（前1%）
+                    if len(valid_scene_hardness) >= 10:
+                        k = max(1000, len(valid_scene_hardness) // 100)  # 至少1000个点，最多前1%
+
+                        # 按loss值排序，取前k个
+                        topk_loss, topk_indices = torch.topk(valid_loss, k)
+                        topk_scene_hardness = valid_scene_hardness[topk_indices]
+
+                        # 计算高loss区域的相关性
+                        high_loss_correlation_matrix = torch.corrcoef(torch.stack([topk_scene_hardness, topk_loss]))
+                        high_loss_correlation = high_loss_correlation_matrix[0, 1].item()
+
+                        high_loss_spearman = self.spearman_correlation_efficient_direct(topk_scene_hardness, topk_loss)
+
+                        print(f"场景级高loss区域皮尔逊相关性(前{k}个): {high_loss_correlation:.3f}")
+                        print(f"场景级高loss区域斯皮尔曼相关性(前{k}个): {high_loss_spearman:.3f}")
+
+                if len(valid_scene_hardness) >= 100:  # 至少100个点才能计算1%
+                    n_total = len(valid_scene_hardness)
+                    k_1percent = max(1, n_total // 100)  # 前1%的数量
+
+                    # 获取前1%预测困难度的索引
+                    _, top1_scene_hardness_indices = torch.topk(valid_scene_hardness, k_1percent)
+
+                    # 获取前1%真实loss的索引
+                    _, top1_loss_indices = torch.topk(valid_loss, k_1percent)
+
+                    # 转换为集合以便计算交集
+                    top1_scene_hardness_set = set(top1_scene_hardness_indices.cpu().numpy())
+                    top1_loss_set = set(top1_loss_indices.cpu().numpy())
+
+                    # 计算交集
+                    intersection_set = top1_scene_hardness_set & top1_loss_set
+                    n_intersection = len(intersection_set)
+
+                    # 计算各种指标
+                    # 1. 精确率：预测为困难的体素中，真正是困难的比例
+                    precision = n_intersection / k_1percent if k_1percent > 0 else 0
+
+                    # 4. Jaccard相似度（IoU）
+                    union_set = top1_scene_hardness_set | top1_loss_set
+                    jaccard_similarity = n_intersection / len(union_set) if len(union_set) > 0 else 0
+
+                    print(f"=== 前1%场景级重叠统计 ===")
+                    print(f"场景级交集数量: {n_intersection}")
+                    print(f"场景级精确率(预测前1%中真实前1%的比例): {precision:.3f}")
+                    print(f"场景级Jaccard相似度(IoU): {jaccard_similarity:.3f}")
         return loss_dict
 
     def spearman_correlation_efficient_direct(self, x, y):

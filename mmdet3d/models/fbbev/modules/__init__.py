@@ -6,3 +6,4 @@ from .occ_loss_utils import *
 from .HPNet import DepthAwareHardnessNet
 # from .Inst_Fuse import *
 from .inst_fuse_refine import *
+from .scene_hpnet import *
