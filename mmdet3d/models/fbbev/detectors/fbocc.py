@@ -654,7 +654,7 @@ class FBOCC(CenterPoint):
             # 选择困难度最高的N个体素
             topk_hardness, topk_indices = torch.topk(
                 hardness_flat.squeeze(-1),
-                k=min(2000, hardness_flat.shape[1]),
+                k=min(1000, hardness_flat.shape[1]),
                 dim=1
             )
 

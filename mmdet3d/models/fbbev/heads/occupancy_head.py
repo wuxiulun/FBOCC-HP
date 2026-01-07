@@ -288,36 +288,34 @@ class OccHead(BaseModule):
 
         # 2. HPNet监督loss
         if hardness_pred is not None and len(output_voxels) > 0:
-            # 计算真实的loss分布和有效掩码
+            # ==================== 基础计算 ====================
             loss_calculator = LossDistributionCalculator(
                 use_focal_loss=self.use_focal_loss,
                 class_weights=self.class_weights,
                 empty_idx=self.empty_idx
             )
 
-            # 计算loss分布和有效掩码
             with torch.no_grad():
                 true_loss_dist, valid_mask = loss_calculator(output_voxels[0].detach(), target_voxels)
 
-            # 将hardness_pred上采样到真实loss分布的分辨率
-            B, H_true, W_true, D_true = true_loss_dist.shape  # [B, 200, 200, 16]
+            B, H_true, W_true, D_true = true_loss_dist.shape
 
-            # 使用三线性插值上采样
+            # 上采样hardness预测
             hardness_pred_upsampled = F.interpolate(
-                hardness_pred.unsqueeze(1),  # 添加通道维度 [B, 1, 100, 100, 8]
+                hardness_pred.unsqueeze(1),
                 size=(H_true, W_true, D_true),
                 mode='trilinear',
                 align_corners=False
-            ).squeeze(1)  # [B, 200, 200, 16]
+            ).squeeze(1)
 
             scene_hardness_pred_upsampled = F.interpolate(
-                scene_hardness_pred.unsqueeze(1),  # 添加通道维度 [B, 1, 100, 100, 8]
+                scene_hardness_pred.unsqueeze(1),
                 size=(H_true, W_true, D_true),
                 mode='trilinear',
                 align_corners=False
-            ).squeeze(1)  # [B, 200, 200, 16]
+            ).squeeze(1)
 
-            # 计算HPNet监督loss（传入有效掩码）
+            # ==================== 计算HPNet监督loss ====================
             hp_supervision_loss = HPNSupervisionLoss(
                 loss_type='top1_percent_focus',
                 temperature=0.1,
@@ -330,153 +328,199 @@ class OccHead(BaseModule):
             loss_scene_hp = hp_supervision_loss(scene_hardness_pred_upsampled, true_loss_dist, valid_mask)
             loss_dict['loss_scene_hp_supervision'] = loss_scene_hp
 
+            # ==================== 监控与统计（仅cuda:0） ====================
             if str(hardness_pred_upsampled.device) == 'cuda:0':
-                # 监控信息（使用上采样后的hardness）
+                # 准备监控数据
                 valid_scene_hardness = scene_hardness_pred_upsampled[valid_mask].flatten()
                 valid_hardness = hardness_pred_upsampled[valid_mask].flatten()
                 valid_loss = true_loss_dist[valid_mask].flatten()
-
-                print(f"scnen Hardness range: [{valid_scene_hardness.min():.3f}, {valid_scene_hardness.max():.3f}]")
-                print(f"scene Hardness mean: {valid_scene_hardness.mean():.3f}")
-                print(f"Hardness range: [{valid_hardness.min():.3f}, {valid_hardness.max():.3f}]")
-                print(f"Hardness mean: {valid_hardness.mean():.3f}")
-                print(f"Loss range: [{valid_loss.min():.3f}, {valid_loss.max():.3f}]")
-                print(f"Loss mean: {valid_loss.mean():.3f}")
-
-                # 统计前N名
-                if len(valid_hardness) > 3000:
-                    scene_hardness_sorted, _ = torch.sort(valid_scene_hardness, descending=True)
-                    hardness_sorted, _ = torch.sort(valid_hardness, descending=True)
-                    loss_sorted, _ = torch.sort(valid_loss, descending=True)
-                    print(f"scene Hardness 第3000名: {scene_hardness_sorted[2999]:.3f}")
-                    print(f"Hardness 第3000名: {hardness_sorted[2999]:.3f}")
-                    print(f"Loss 第3000名: {loss_sorted[2999]:.3f}")
-                else:
-                    print(f"有效区域不足3000个: {len(valid_hardness)}")
-
-                # 使用所有有效点计算相关性
+                
+                # 计算全局困难度（基于置信度）
+                with torch.no_grad():
+                    logits = output_voxels[0].detach()
+                    logits_excluding_ignore = logits[:, 1:, :, :, :]
+                    probs = F.softmax(logits_excluding_ignore, dim=1)
+                    top2_probs, _ = torch.topk(probs, k=2, dim=1)
+                    prob_diff = top2_probs[:, 0, ...] - top2_probs[:, 1, ...]
+                    epsilon = 1e-3
+                    prob_diff = torch.clamp(prob_diff, min=epsilon, max=1.0-epsilon)
+                    global_hardness_raw = 1.0 / prob_diff
+                    global_hardness = torch.log(global_hardness_raw)
+                    valid_global_hardness = global_hardness[valid_mask].flatten()
+                
+                # ==================== 精简的对比统计 ====================
+                n_total = len(valid_hardness)
+                
+                # 计算总体平均loss
+                overall_loss_mean = valid_loss.mean().item()
+                
+                # 0. 前1%困难度对应的loss均值对比（新增）
+                if n_total >= 100:
+                    k_1percent = max(1, n_total // 100)
+                    
+                    # 获取前1%的索引
+                    _, top1_hardness_idx = torch.topk(valid_hardness, k_1percent)
+                    _, top1_scene_idx = torch.topk(valid_scene_hardness, k_1percent)
+                    _, top1_global_idx = torch.topk(valid_global_hardness, k_1percent)
+                    
+                    # 计算对应的loss均值
+                    top1_hardness_loss_mean = valid_loss[top1_hardness_idx].mean().item()
+                    top1_scene_loss_mean = valid_loss[top1_scene_idx].mean().item()
+                    top1_global_loss_mean = valid_loss[top1_global_idx].mean().item()
+                    
+                    # 计算相对提升（相对于总体平均）
+                    hardness_relative_gain = (top1_hardness_loss_mean - overall_loss_mean) / overall_loss_mean * 100
+                    scene_relative_gain = (top1_scene_loss_mean - overall_loss_mean) / overall_loss_mean * 100
+                    global_relative_gain = (top1_global_loss_mean - overall_loss_mean) / overall_loss_mean * 100
+                    
+                    # 计算相对于随机选择的提升倍数
+                    # 随机选择k个样本的期望loss均值就是总体平均loss
+                    hardness_gain_ratio = top1_hardness_loss_mean / overall_loss_mean
+                    scene_gain_ratio = top1_scene_loss_mean / overall_loss_mean
+                    global_gain_ratio = top1_global_loss_mean / overall_loss_mean
+                    
+                    print("\n" + "="*60)
+                    print("前1%困难度对应的Loss均值对比（关键指标）")
+                    print("="*60)
+                    print(f"总体平均Loss: {overall_loss_mean:.4f}")
+                    print(f"{'类型':<10} {'前1% Loss均值':<15} {'相对提升':<15} {'提升倍数':<15}")
+                    print(f"{'体素级':<10} {top1_hardness_loss_mean:<15.4f} {hardness_relative_gain:<15.1f}% {hardness_gain_ratio:<15.2f}x")
+                    print(f"{'场景级':<10} {top1_scene_loss_mean:<15.4f} {scene_relative_gain:<15.1f}% {scene_gain_ratio:<15.2f}x")
+                    print(f"{'全局困难度':<10} {top1_global_loss_mean:<15.4f} {global_relative_gain:<15.1f}% {global_gain_ratio:<15.2f}x")
+                    
+                    # 计算识别效率（前1%中loss在前1%的比例 = 精确率）
+                    # 这部分已经在后面的统计中有了，但这里可以再强调一下
+                
+                # 1. 相关性对比表格
+                print("\n" + "="*60)
+                print("三种困难度相关性对比")
+                print("="*60)
+                
+                # 全部有效点相关性
                 if len(valid_hardness) >= 2:
-                    # 皮尔逊相关性
-                    correlation_matrix = torch.corrcoef(torch.stack([valid_hardness, valid_loss]))
-                    correlation = correlation_matrix[0, 1].item()
-
-                    # 斯皮尔曼相关性
-                    spearman_corr = self.spearman_correlation_efficient_direct(valid_hardness, valid_loss)
-
-                    print(f"皮尔逊相关性(全部{len(valid_hardness)}个有效点): {correlation:.3f}")
-                    print(f"斯皮尔曼相关性(全部{len(valid_hardness)}个有效点): {spearman_corr:.3f}")
-
-                    # 额外统计：高loss区域的相关性（前1%）
-                    if len(valid_hardness) >= 10:
-                        k = max(1000, len(valid_hardness) // 100)  # 至少1000个点，最多前1%
-
-                        # 按loss值排序，取前k个
-                        topk_loss, topk_indices = torch.topk(valid_loss, k)
-                        topk_hardness = valid_hardness[topk_indices]
-
-                        # 计算高loss区域的相关性
-                        high_loss_correlation_matrix = torch.corrcoef(torch.stack([topk_hardness, topk_loss]))
-                        high_loss_correlation = high_loss_correlation_matrix[0, 1].item()
-
-                        high_loss_spearman = self.spearman_correlation_efficient_direct(topk_hardness, topk_loss)
-
-                        print(f"高loss区域皮尔逊相关性(前{k}个): {high_loss_correlation:.3f}")
-                        print(f"高loss区域斯皮尔曼相关性(前{k}个): {high_loss_spearman:.3f}")
-
-                if len(valid_hardness) >= 100:  # 至少100个点才能计算1%
-                    n_total = len(valid_hardness)
-                    k_1percent = max(1, n_total // 100)  # 前1%的数量
-
-                    # 获取前1%预测困难度的索引
-                    _, top1_hardness_indices = torch.topk(valid_hardness, k_1percent)
-
-                    # 获取前1%真实loss的索引
-                    _, top1_loss_indices = torch.topk(valid_loss, k_1percent)
-
-                    # 转换为集合以便计算交集
-                    top1_hardness_set = set(top1_hardness_indices.cpu().numpy())
-                    top1_loss_set = set(top1_loss_indices.cpu().numpy())
-
+                    # 体素级相关性
+                    hardness_corr_matrix = torch.corrcoef(torch.stack([valid_hardness, valid_loss]))
+                    hardness_corr = hardness_corr_matrix[0, 1].item()
+                    hardness_spearman = self.spearman_correlation_efficient_direct(valid_hardness, valid_loss)
+                    
+                    # 场景级相关性
+                    scene_corr_matrix = torch.corrcoef(torch.stack([valid_scene_hardness, valid_loss]))
+                    scene_corr = scene_corr_matrix[0, 1].item()
+                    scene_spearman = self.spearman_correlation_efficient_direct(valid_scene_hardness, valid_loss)
+                    
+                    # 全局困难度相关性
+                    global_corr_matrix = torch.corrcoef(torch.stack([valid_global_hardness, valid_loss]))
+                    global_corr = global_corr_matrix[0, 1].item()
+                    global_spearman = self.spearman_correlation_efficient_direct(valid_global_hardness, valid_loss)
+                    
+                    print(f"{'类型':<10} {'皮尔逊相关性':<15} {'斯皮尔曼相关性':<15}")
+                    print(f"{'体素级':<10} {hardness_corr:<15.3f} {hardness_spearman:<15.3f}")
+                    print(f"{'场景级':<10} {scene_corr:<15.3f} {scene_spearman:<15.3f}")
+                    print(f"{'全局困难度':<10} {global_corr:<15.3f} {global_spearman:<15.3f}")
+                
+                # 2. 前1%重叠统计对比
+                if n_total >= 100:
+                    k_1percent = max(1, n_total // 100)
+                    
+                    # 获取前1%的索引（这里重新获取一遍，避免重复计算）
+                    _, top1_hardness_idx = torch.topk(valid_hardness, k_1percent)
+                    _, top1_scene_idx = torch.topk(valid_scene_hardness, k_1percent)
+                    _, top1_global_idx = torch.topk(valid_global_hardness, k_1percent)
+                    _, top1_loss_idx = torch.topk(valid_loss, k_1percent)
+                    
+                    # 转换为集合
+                    top1_hardness_set = set(top1_hardness_idx.cpu().numpy())
+                    top1_scene_set = set(top1_scene_idx.cpu().numpy())
+                    top1_global_set = set(top1_global_idx.cpu().numpy())
+                    top1_loss_set = set(top1_loss_idx.cpu().numpy())
+                    
                     # 计算交集
-                    intersection_set = top1_hardness_set & top1_loss_set
-                    n_intersection = len(intersection_set)
+                    inter_hardness = len(top1_hardness_set & top1_loss_set)
+                    inter_scene = len(top1_scene_set & top1_loss_set)
+                    inter_global = len(top1_global_set & top1_loss_set)
+                    
+                    # 计算精确率和IoU
+                    precision_hardness = inter_hardness / k_1percent
+                    precision_scene = inter_scene / k_1percent
+                    precision_global = inter_global / k_1percent
+                    
+                    union_hardness = len(top1_hardness_set | top1_loss_set)
+                    union_scene = len(top1_scene_set | top1_loss_set)
+                    union_global = len(top1_global_set | top1_loss_set)
+                    
+                    iou_hardness = inter_hardness / union_hardness if union_hardness > 0 else 0
+                    iou_scene = inter_scene / union_scene if union_scene > 0 else 0
+                    iou_global = inter_global / union_global if union_global > 0 else 0
+                    
+                    print("\n" + "="*60)
+                    print("前1%重叠统计对比")
+                    print("="*60)
+                    print(f"{'类型':<10} {'交集数量':<10} {'精确率':<10} {'IoU':<10}")
+                    print(f"{'体素级':<10} {inter_hardness:<10} {precision_hardness:<10.3f} {iou_hardness:<10.3f}")
+                    print(f"{'场景级':<10} {inter_scene:<10} {precision_scene:<10.3f} {iou_scene:<10.3f}")
+                    print(f"{'全局困难度':<10} {inter_global:<10} {precision_global:<10.3f} {iou_global:<10.3f}")
+                
+                # 3. 前1%困难度 vs 前5%真实loss对比
+                if n_total >= 100:
+                    k_5percent_loss = max(1, n_total // 20)
+                    k_1percent = max(1, n_total // 100)
+                    
+                    # 获取前5%loss的索引
+                    _, top5_loss_idx = torch.topk(valid_loss, k_5percent_loss)
+                    top5_loss_set = set(top5_loss_idx.cpu().numpy())
+                    
+                    # 计算与各种困难度前1%的交集
+                    inter_hardness_5loss = len(top1_hardness_set & top5_loss_set)
+                    inter_scene_5loss = len(top1_scene_set & top5_loss_set)
+                    inter_global_5loss = len(top1_global_set & top5_loss_set)
+                    
+                    # 计算精确率、召回率、F1、IoU
+                    precision_hardness_5loss = inter_hardness_5loss / k_1percent
+                    precision_scene_5loss = inter_scene_5loss / k_1percent
+                    precision_global_5loss = inter_global_5loss / k_1percent
+                    
+                    recall_hardness_5loss = inter_hardness_5loss / k_5percent_loss
+                    recall_scene_5loss = inter_scene_5loss / k_5percent_loss
+                    recall_global_5loss = inter_global_5loss / k_5percent_loss
+                    
+                    # 计算F1分数
+                    def compute_f1(precision, recall):
+                        if precision + recall > 0:
+                            return 2 * precision * recall / (precision + recall)
+                        return 0.0
+                    
+                    f1_hardness = compute_f1(precision_hardness_5loss, recall_hardness_5loss)
+                    f1_scene = compute_f1(precision_scene_5loss, recall_scene_5loss)
+                    f1_global = compute_f1(precision_global_5loss, recall_global_5loss)
+                    
+                    # 计算IoU
+                    union_hardness_5loss = len(top1_hardness_set | top5_loss_set)
+                    union_scene_5loss = len(top1_scene_set | top5_loss_set)
+                    union_global_5loss = len(top1_global_set | top5_loss_set)
+                    
+                    iou_hardness_5loss = inter_hardness_5loss / union_hardness_5loss if union_hardness_5loss > 0 else 0
+                    iou_scene_5loss = inter_scene_5loss / union_scene_5loss if union_scene_5loss > 0 else 0
+                    iou_global_5loss = inter_global_5loss / union_global_5loss if union_global_5loss > 0 else 0
+                    
+                    print("\n" + "="*60)
+                    print("前1%困难度 vs 前5%真实loss对比")
+                    print("="*60)
+                    print(f"{'类型':<10} {'精确率':<10} {'召回率':<10} {'F1分数':<10} {'IoU':<10}")
+                    print(f"{'体素级':<10} {precision_hardness_5loss:<10.3f} {recall_hardness_5loss:<10.3f} {f1_hardness:<10.3f} {iou_hardness_5loss:<10.3f}")
+                    print(f"{'场景级':<10} {precision_scene_5loss:<10.3f} {recall_scene_5loss:<10.3f} {f1_scene:<10.3f} {iou_scene_5loss:<10.3f}")
+                    print(f"{'全局困难度':<10} {precision_global_5loss:<10.3f} {recall_global_5loss:<10.3f} {f1_global:<10.3f} {iou_global_5loss:<10.3f}")
+                    
+                    # 打印基本统计信息（简要）
+                    print("\n" + "="*60)
+                    print("基本统计信息")
+                    print("="*60)
+                    print(f"有效体素总数: {n_total}")
+                    print(f"体素级困难度范围: [{valid_hardness.min():.3f}, {valid_hardness.max():.3f}]")
+                    print(f"场景级困难度范围: [{valid_scene_hardness.min():.3f}, {valid_scene_hardness.max():.3f}]")
+                    print(f"全局困难度范围: [{valid_global_hardness.min():.3f}, {valid_global_hardness.max():.3f}]")
+                    print(f"真实loss范围: [{valid_loss.min():.3f}, {valid_loss.max():.3f}]")
 
-                    # 计算各种指标
-                    # 1. 精确率：预测为困难的体素中，真正是困难的比例
-                    precision = n_intersection / k_1percent if k_1percent > 0 else 0
-
-                    # 4. Jaccard相似度（IoU）
-                    union_set = top1_hardness_set | top1_loss_set
-                    jaccard_similarity = n_intersection / len(union_set) if len(union_set) > 0 else 0
-
-                    print(f"=== 前1%重叠统计 ===")
-                    print(f"交集数量: {n_intersection}")
-                    print(f"精确率(预测前1%中真实前1%的比例): {precision:.3f}")
-                    print(f"Jaccard相似度(IoU): {jaccard_similarity:.3f}")
-
-
-
-
-                # 使用所有有效点计算相关性
-                if len(valid_scene_hardness) >= 2:
-                    # 皮尔逊相关性
-                    correlation_matrix = torch.corrcoef(torch.stack([valid_scene_hardness, valid_loss]))
-                    correlation = correlation_matrix[0, 1].item()
-
-                    # 斯皮尔曼相关性
-                    spearman_corr = self.spearman_correlation_efficient_direct(valid_scene_hardness, valid_loss)
-
-                    print(f"场景级皮尔逊相关性(全部{len(valid_scene_hardness)}个有效点): {correlation:.3f}")
-                    print(f"场景级斯皮尔曼相关性(全部{len(valid_scene_hardness)}个有效点): {spearman_corr:.3f}")
-
-                    # 额外统计：高loss区域的相关性（前1%）
-                    if len(valid_scene_hardness) >= 10:
-                        k = max(1000, len(valid_scene_hardness) // 100)  # 至少1000个点，最多前1%
-
-                        # 按loss值排序，取前k个
-                        topk_loss, topk_indices = torch.topk(valid_loss, k)
-                        topk_scene_hardness = valid_scene_hardness[topk_indices]
-
-                        # 计算高loss区域的相关性
-                        high_loss_correlation_matrix = torch.corrcoef(torch.stack([topk_scene_hardness, topk_loss]))
-                        high_loss_correlation = high_loss_correlation_matrix[0, 1].item()
-
-                        high_loss_spearman = self.spearman_correlation_efficient_direct(topk_scene_hardness, topk_loss)
-
-                        print(f"场景级高loss区域皮尔逊相关性(前{k}个): {high_loss_correlation:.3f}")
-                        print(f"场景级高loss区域斯皮尔曼相关性(前{k}个): {high_loss_spearman:.3f}")
-
-                if len(valid_scene_hardness) >= 100:  # 至少100个点才能计算1%
-                    n_total = len(valid_scene_hardness)
-                    k_1percent = max(1, n_total // 100)  # 前1%的数量
-
-                    # 获取前1%预测困难度的索引
-                    _, top1_scene_hardness_indices = torch.topk(valid_scene_hardness, k_1percent)
-
-                    # 获取前1%真实loss的索引
-                    _, top1_loss_indices = torch.topk(valid_loss, k_1percent)
-
-                    # 转换为集合以便计算交集
-                    top1_scene_hardness_set = set(top1_scene_hardness_indices.cpu().numpy())
-                    top1_loss_set = set(top1_loss_indices.cpu().numpy())
-
-                    # 计算交集
-                    intersection_set = top1_scene_hardness_set & top1_loss_set
-                    n_intersection = len(intersection_set)
-
-                    # 计算各种指标
-                    # 1. 精确率：预测为困难的体素中，真正是困难的比例
-                    precision = n_intersection / k_1percent if k_1percent > 0 else 0
-
-                    # 4. Jaccard相似度（IoU）
-                    union_set = top1_scene_hardness_set | top1_loss_set
-                    jaccard_similarity = n_intersection / len(union_set) if len(union_set) > 0 else 0
-
-                    print(f"=== 前1%场景级重叠统计 ===")
-                    print(f"场景级交集数量: {n_intersection}")
-                    print(f"场景级精确率(预测前1%中真实前1%的比例): {precision:.3f}")
-                    print(f"场景级Jaccard相似度(IoU): {jaccard_similarity:.3f}")
-        return loss_dict
+            return loss_dict
 
     def spearman_correlation_efficient_direct(self, x, y):
         """直接计算两个一维张量的斯皮尔曼相关性"""
