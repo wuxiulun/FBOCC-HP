@@ -182,24 +182,284 @@ class OccHead(BaseModule):
 
         return output
      
+    # @force_fp32()
+    # def forward(self, voxel_feats, img_feats=None, pts_feats=None, transform=None, **kwargs):
+        
+    #     assert type(voxel_feats) is list and len(voxel_feats) == self.num_level
+        
+    #     output = self.forward_coarse_voxel(voxel_feats)
+    #     out_voxel_feats = output['out_voxel_feats'][0]
+    #     coarse_occ = output['occ'][0]
+
+    #     res = {
+    #         'output_voxels': output['occ'],
+    #         'output_voxels_fine': output.get('fine_output', None),
+    #         'output_coords_fine': output.get('fine_coord', None),
+    #     }
+
+
+    #     return res
+    
     @force_fp32()
     def forward(self, voxel_feats, img_feats=None, pts_feats=None, transform=None, **kwargs):
-        
+
         assert type(voxel_feats) is list and len(voxel_feats) == self.num_level
-        
+
         output = self.forward_coarse_voxel(voxel_feats)
         out_voxel_feats = output['out_voxel_feats'][0]
         coarse_occ = output['occ'][0]
 
+        # ==================== 新增：在测试阶段也计算统计和损失分布 ====================
+        hardness_pred = kwargs.get('hardness_pred', None)
+        scene_hardness_pred = kwargs.get('scene_hardness_pred', None)
+        target_voxels = kwargs.get('gt_occupancy', None)[0] # 验证集有gt_occupancy
+        visible_mask = kwargs.get('visible_mask', None)  # 可见性掩码
+
+        # 获取预测的空间维度
+        B, C, H, W, D = coarse_occ.shape
+
+        # 调整hardness_pred和scene_hardness_pred的形状以匹配occupancy
+        if hardness_pred is not None:
+            if hardness_pred.dim() == 3:  # [H, W] 或 [H, W, D]
+                if hardness_pred.shape[-1] != D:  # 如果是2D的BEV特征
+                    # 扩展到3D
+                    hardness_pred = hardness_pred.unsqueeze(-1).expand(-1, -1, D)
+                # 确保有batch维度
+                if hardness_pred.dim() == 3:
+                    hardness_pred = hardness_pred.unsqueeze(0)
+            elif hardness_pred.dim() == 4:  # [B, H, W, D]
+                pass  # 已经是正确形状
+            else:
+                # 调整到正确形状
+                hardness_pred = F.interpolate(
+                    hardness_pred.unsqueeze(1),
+                    size=(H, W, D),
+                    mode='trilinear',
+                    align_corners=False
+                ).squeeze(1)
+
+        if scene_hardness_pred is not None:
+            if scene_hardness_pred.dim() == 3:  # [H, W] 或 [H, W, D]
+                if scene_hardness_pred.shape[-1] != D:
+                    scene_hardness_pred = scene_hardness_pred.unsqueeze(-1).expand(-1, -1, D)
+                if scene_hardness_pred.dim() == 3:
+                    scene_hardness_pred = scene_hardness_pred.unsqueeze(0)
+            elif scene_hardness_pred.dim() == 4:
+                pass
+            else:
+                scene_hardness_pred = F.interpolate(
+                    scene_hardness_pred.unsqueeze(1),
+                    size=(H, W, D),
+                    mode='trilinear',
+                    align_corners=False
+                ).squeeze(1)
+
+        # 计算全局困难度（基于置信度）
+        global_hardness = None
+        if coarse_occ is not None:
+            if coarse_occ.shape[1] == self.out_channel:
+                logits_excluding_ignore = coarse_occ[:, 1:, :, :, :]
+            else:
+                logits_excluding_ignore = coarse_occ
+
+            probs = F.softmax(logits_excluding_ignore, dim=1)
+            top2_probs, _ = torch.topk(probs, k=2, dim=1)
+            prob_diff = top2_probs[:, 0, ...] - top2_probs[:, 1, ...]
+            epsilon = 1e-3
+            prob_diff = torch.clamp(prob_diff, min=epsilon, max=1.0 - epsilon)
+            global_hardness_raw = 1.0 / prob_diff
+            global_hardness = torch.log(global_hardness_raw)  # [B, H, W, D]
+
+        # 计算损失分布（如果有gt）
+        loss_distribution = None
+        monitor_stats = {}
+
+        if target_voxels is not None:
+            # 使用LossDistributionCalculator计算真实损失分布
+            loss_calculator = LossDistributionCalculator(
+                use_focal_loss=self.use_focal_loss,
+                class_weights=self.class_weights,
+                empty_idx=self.empty_idx
+            )
+
+            with torch.no_grad():
+                loss_distribution, valid_mask = loss_calculator(coarse_occ.detach(), target_voxels)
+
+            # 计算统计信号（类似enhanced_loss中的统计）
+            if hardness_pred is not None and scene_hardness_pred is not None:
+                B_loss, H_true, W_true, D_true = loss_distribution.shape
+
+                # 上采样困难度预测到损失分布的分辨率
+                hardness_pred_upsampled = F.interpolate(
+                    hardness_pred.unsqueeze(1),
+                    size=(H_true, W_true, D_true),
+                    mode='trilinear',
+                    align_corners=False
+                ).squeeze(1)
+
+                scene_hardness_pred_upsampled = F.interpolate(
+                    scene_hardness_pred.unsqueeze(1),
+                    size=(H_true, W_true, D_true),
+                    mode='trilinear',
+                    align_corners=False
+                ).squeeze(1)
+
+                # 获取所有有效体素的困难度和损失
+                valid_hardness = hardness_pred_upsampled[valid_mask].flatten()
+                valid_scene_hardness = scene_hardness_pred_upsampled[valid_mask].flatten()
+                valid_loss = loss_distribution[valid_mask].flatten()
+
+                if global_hardness is not None:
+                    global_hardness_upsampled = F.interpolate(
+                        global_hardness.unsqueeze(1),
+                        size=(H_true, W_true, D_true),
+                        mode='trilinear',
+                        align_corners=False
+                    ).squeeze(1)
+                    valid_global_hardness = global_hardness_upsampled[valid_mask].flatten()
+
+                # 计算统计指标
+                n_total = len(valid_loss)
+
+                if n_total > 0:
+                    monitor_stats['valid_voxel_count'] = n_total
+                    monitor_stats['overall_loss_mean'] = valid_loss.mean().item()
+                    monitor_stats['loss_range'] = [valid_loss.min().item(), valid_loss.max().item()]
+                    monitor_stats['hardness_range'] = [valid_hardness.min().item(), valid_hardness.max().item()]
+                    monitor_stats['scene_hardness_range'] = [valid_scene_hardness.min().item(),
+                                                             valid_scene_hardness.max().item()]
+
+                    if global_hardness is not None:
+                        monitor_stats['global_hardness_range'] = [valid_global_hardness.min().item(),
+                                                                  valid_global_hardness.max().item()]
+
+                    # 1. 前1%困难度对应的Loss均值对比
+                    if n_total >= 100:
+                        k_1percent = max(1, n_total // 100)
+
+                        # 获取前1%的索引
+                        _, top1_hardness_idx = torch.topk(valid_hardness, k_1percent)
+                        _, top1_scene_idx = torch.topk(valid_scene_hardness, k_1percent)
+
+                        if global_hardness is not None:
+                            _, top1_global_idx = torch.topk(valid_global_hardness, k_1percent)
+
+                        # 计算对应的loss均值
+                        top1_hardness_loss_mean = valid_loss[top1_hardness_idx].mean().item()
+                        top1_scene_loss_mean = valid_loss[top1_scene_idx].mean().item()
+                        overall_loss_mean = valid_loss.mean().item()
+
+                        # 计算相对提升
+                        hardness_relative_gain = (top1_hardness_loss_mean - overall_loss_mean) / overall_loss_mean * 100
+                        scene_relative_gain = (top1_scene_loss_mean - overall_loss_mean) / overall_loss_mean * 100
+
+                        monitor_stats['top1_hardness_loss_mean'] = top1_hardness_loss_mean
+                        monitor_stats['top1_scene_loss_mean'] = top1_scene_loss_mean
+                        monitor_stats['hardness_relative_gain'] = hardness_relative_gain
+                        monitor_stats['scene_relative_gain'] = scene_relative_gain
+
+                        if global_hardness is not None:
+                            top1_global_loss_mean = valid_loss[top1_global_idx].mean().item()
+                            global_relative_gain = (top1_global_loss_mean - overall_loss_mean) / overall_loss_mean * 100
+                            monitor_stats['top1_global_loss_mean'] = top1_global_loss_mean
+                            monitor_stats['global_relative_gain'] = global_relative_gain
+
+                    # 2. 相关性计算
+                    if len(valid_hardness) >= 2:
+                        # 皮尔逊相关性
+                        hardness_corr_matrix = torch.corrcoef(torch.stack([valid_hardness, valid_loss]))
+                        hardness_corr = hardness_corr_matrix[0, 1].item()
+                        monitor_stats['hardness_pearson_corr'] = hardness_corr
+
+                        scene_corr_matrix = torch.corrcoef(torch.stack([valid_scene_hardness, valid_loss]))
+                        scene_corr = scene_corr_matrix[0, 1].item()
+                        monitor_stats['scene_pearson_corr'] = scene_corr
+
+                        if global_hardness is not None:
+                            global_corr_matrix = torch.corrcoef(torch.stack([valid_global_hardness, valid_loss]))
+                            global_corr = global_corr_matrix[0, 1].item()
+                            monitor_stats['global_pearson_corr'] = global_corr
+
+                        # 斯皮尔曼相关性
+                        def spearman_correlation_efficient_direct(x, y):
+                            n = x.shape[0]
+                            if n < 2:
+                                return 0.0
+                            x_ranks = torch.argsort(torch.argsort(x))
+                            y_ranks = torch.argsort(torch.argsort(y))
+                            corr_matrix = torch.corrcoef(torch.stack([x_ranks.float(), y_ranks.float()]))
+                            return corr_matrix[0, 1].item()
+
+                        monitor_stats['hardness_spearman_corr'] = spearman_correlation_efficient_direct(valid_hardness,
+                                                                                                        valid_loss)
+                        monitor_stats['scene_spearman_corr'] = spearman_correlation_efficient_direct(
+                            valid_scene_hardness, valid_loss)
+                        if global_hardness is not None:
+                            monitor_stats['global_spearman_corr'] = spearman_correlation_efficient_direct(
+                                valid_global_hardness, valid_loss)
+
+                    # 3. 前1%重叠统计对比
+                    if n_total >= 100:
+                        k_1percent = max(1, n_total // 100)
+
+                        # 获取真实loss前1%的索引
+                        _, top1_loss_idx = torch.topk(valid_loss, k_1percent)
+
+                        # 转换为集合
+                        top1_hardness_set = set(top1_hardness_idx.cpu().numpy())
+                        top1_scene_set = set(top1_scene_idx.cpu().numpy())
+                        top1_loss_set = set(top1_loss_idx.cpu().numpy())
+
+                        # 计算交集
+                        inter_hardness = len(top1_hardness_set & top1_loss_set)
+                        inter_scene = len(top1_scene_set & top1_loss_set)
+
+                        # 计算精确率和IoU
+                        precision_hardness = inter_hardness / k_1percent
+                        precision_scene = inter_scene / k_1percent
+
+                        union_hardness = len(top1_hardness_set | top1_loss_set)
+                        union_scene = len(top1_scene_set | top1_loss_set)
+
+                        iou_hardness = inter_hardness / union_hardness if union_hardness > 0 else 0
+                        iou_scene = inter_scene / union_scene if union_scene > 0 else 0
+
+                        monitor_stats['hardness_precision'] = precision_hardness
+                        monitor_stats['scene_precision'] = precision_scene
+                        monitor_stats['hardness_iou'] = iou_hardness
+                        monitor_stats['scene_iou'] = iou_scene
+
+                        if global_hardness is not None:
+                            top1_global_set = set(top1_global_idx.cpu().numpy())
+                            inter_global = len(top1_global_set & top1_loss_set)
+                            precision_global = inter_global / k_1percent
+                            union_global = len(top1_global_set | top1_loss_set)
+                            iou_global = inter_global / union_global if union_global > 0 else 0
+
+                            monitor_stats['global_precision'] = precision_global
+                            monitor_stats['global_iou'] = iou_global
+
+        # ==================== 返回所有信号 ====================
         res = {
             'output_voxels': output['occ'],
             'output_voxels_fine': output.get('fine_output', None),
             'output_coords_fine': output.get('fine_coord', None),
+            'hardness_pred': hardness_pred,  # 体素级困难度 [B, H, W, D]
+            'scene_hardness_pred': scene_hardness_pred,  # 场景级困难度 [B, H, W, D]
+            'global_hardness': global_hardness,  # 全局困难度 [B, H, W, D]
+            'loss_distribution': loss_distribution,  # 损失分布 [B, H, W, D]
+            'monitor_stats': monitor_stats,  # 统计信号
         }
 
-
         return res
-    
+
+
+
+
+
+
+
+
     @force_fp32()
     def forward_train(self, voxel_feats, img_feats=None, pts_feats=None, transform=None, gt_occupancy=None, gt_occupancy_flow=None, **kwargs):
         mark = kwargs.get('mark', None)

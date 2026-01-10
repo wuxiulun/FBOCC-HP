@@ -166,7 +166,7 @@ def main():
         torch.backends.cudnn.benchmark = True
     
     # each process may have different time
-    out_dir =  osp.join('test', args.config.split('/')[-1][:-3], time.ctime().replace(' ','_').replace(':','_'))[:-8]
+    out_dir =  osp.join('/root/autodl-tmp/test', args.config.split('/')[-1][:-3], time.ctime().replace(' ','_').replace(':','_'))[:-8]
 
     if args.save:
         cfg.model.occupancy_save_path = out_dir
