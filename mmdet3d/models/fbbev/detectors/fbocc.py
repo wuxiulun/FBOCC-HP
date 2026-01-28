@@ -761,8 +761,13 @@ class FBOCC(CenterPoint):
                 monitor_save_dir = os.path.join(self.occupancy_save_path, 'monitor_signals')
                 os.makedirs(monitor_save_dir, exist_ok=True)
 
+                # ==================== 新增：创建visible信号保存目录 ====================
+                visible_save_dir = os.path.join(self.occupancy_save_path, 'visible_signals')
+                os.makedirs(visible_save_dir, exist_ok=True)
+
                 # 3. 处理并保存各个信号
                 monitor_data = {}
+                visible_monitor_data = {}
 
                 # 处理体素级困难度
                 voxel_hardness = occ_res.get('hardness_pred')
@@ -796,6 +801,46 @@ class FBOCC(CenterPoint):
                 # 保存监控信号文件
                 monitor_save_path = os.path.join(monitor_save_dir, f'{sample_token}_signals.npz')
                 np.savez_compressed(monitor_save_path, **monitor_data)
+
+                # ==================== 新增：保存visible监控信号 ====================
+                # 获取visible_monitor_stats
+                visible_monitor_stats = occ_res.get('visible_monitor_stats', {})
+                if visible_monitor_stats:
+                    # 转换numpy类型
+                    def convert_to_serializable(obj):
+                        if isinstance(obj, torch.Tensor):
+                            if obj.numel() == 1:
+                                return obj.cpu().item()
+                            else:
+                                return obj.cpu().numpy()
+                        elif isinstance(obj, (np.ndarray, np.generic)):
+                            return obj.tolist() if hasattr(obj, 'tolist') else obj
+                        else:
+                            return obj
+
+                    for key, value in visible_monitor_stats.items():
+                        visible_monitor_data[key] = convert_to_serializable(value)
+                    
+                    # 添加元数据
+                    visible_monitor_data['sample_token'] = sample_token
+                    visible_monitor_data['scene_name'] = scene_name
+                    
+                    # 保存visible监控信号文件
+                    visible_save_path = os.path.join(visible_save_dir, f'{sample_token}_visible_signals.npz')
+                    np.savez_compressed(visible_save_path, **visible_monitor_data)
+                    
+                    # ==================== 新增：保存visible监控统计为JSON ====================
+                    visible_stats_dir = os.path.join(self.occupancy_save_path, 'visible_stats')
+                    os.makedirs(visible_stats_dir, exist_ok=True)
+                    
+                    # 将统计信息保存为JSON
+                    import json
+                    visible_stats_path = os.path.join(visible_stats_dir, f'{sample_token}_visible_stats.json')
+                    with open(visible_stats_path, 'w') as f:
+                        json.dump(visible_monitor_data, f, indent=2, ensure_ascii=False)
+                    
+                    print(f"Saved visible monitor signals to: {visible_save_path}")
+                    print(f"  Contains: {list(visible_monitor_stats.keys())}")
 
                 # ==================== 新增：保存cam_hardness ====================
                 # 4. 创建cam_hardness保存目录
