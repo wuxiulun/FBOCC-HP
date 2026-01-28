@@ -545,90 +545,6 @@ class FBOCC(CenterPoint):
         assert False
         return None
 
-    # def simple_test(self,
-    #                 points,
-    #                 img_metas,
-    #                 img=None,
-    #                 rescale=False,
-    #                 visible_mask=[None],
-    #                 return_raw_occ=False,
-    #                 **kwargs):
-    #     """Test function without augmentaiton."""
-    #     results = self.extract_feat(
-    #         points, img=img, img_metas=img_metas, **kwargs)
-        
-
-    #     bbox_list = [dict() for _ in range(len(img_metas))]
-        
-    #     if  self.with_pts_bbox:
-    #         bbox_pts = self.simple_test_pts(results['img_bev_feat'], img_metas, rescale=rescale)
-    #     else:
-    #         bbox_pts = [None for _ in range(len(img_metas))]
-
-
-    #     if self.with_specific_component('occupancy_head'):
-    #         #pred_occupancy = self.occupancy_head(results['img_bev_feat'], results=results, **kwargs)['output_voxels'][0]
-    #         pred_occupancy = self.occupancy_head(results['img_bev_feat_inst_refined'], results=results, **kwargs)['output_voxels'][0]
-
-
-    #         pred_occupancy = pred_occupancy.permute(0, 2, 3, 4, 1)[0]
-    #         if self.fix_void:
-    #             pred_occupancy = pred_occupancy[..., 1:]     
-    #         pred_occupancy = pred_occupancy.softmax(-1)
-
-
-    #         # convert to CVPR2023 Format
-    #         pred_occupancy = pred_occupancy.permute(3, 2, 0, 1)
-    #         pred_occupancy = torch.flip(pred_occupancy, [2])
-    #         pred_occupancy = torch.rot90(pred_occupancy, -1, [2, 3])
-    #         pred_occupancy = pred_occupancy.permute(2, 3, 1, 0)
-            
-    #         if return_raw_occ:
-    #             pred_occupancy_category = pred_occupancy
-    #         else:
-    #             pred_occupancy_category = pred_occupancy.argmax(-1) 
-            
-
-    #         # # do not change the order
-    #         # if self.occupancy_save_path is not None:
-    #         #     scene_name = img_metas[0]['scene_name']
-    #         #     sample_token = img_metas[0]['sample_idx']
-    #         #     mask_camera = visible_mask[0][0]
-    #         #     masked_pred_occupancy = pred_occupancy[mask_camera].cpu().numpy()
-    #         #     save_path = os.path.join(self.occupancy_save_path, 'occupancy_pred', scene_name+'_'+sample_token)
-    #         #     np.savez_compressed(save_path, pred=masked_pred_occupancy, sample_token=sample_token) 
-
-
-    #         # For test server
-    #         if self.occupancy_save_path is not None:
-    #                 scene_name = img_metas[0]['scene_name']
-    #                 sample_token = img_metas[0]['sample_idx']
-    #                 # mask_camera = visible_mask[0][0]
-    #                 # masked_pred_occupancy = pred_occupancy[mask_camera].cpu().numpy()
-    #                 save_pred_occupancy = pred_occupancy.argmax(-1).cpu().numpy()
-    #                 save_path = os.path.join(self.occupancy_save_path, 'occupancy_pred', f'{sample_token}.npz')
-    #                 np.savez_compressed(save_path, save_pred_occupancy.astype(np.uint8)) 
-
-    #         pred_occupancy_category= pred_occupancy_category.cpu().numpy()
-
-    #     else:
-    #         pred_occupancy_category =  None
-
-    #     if results.get('bev_mask_logit', None) is not None:
-    #         pred_bev_mask = results['bev_mask_logit'].sigmoid() > 0.5
-    #         iou = IOU(pred_bev_mask.reshape(1, -1), kwargs['gt_bev_mask'][0].reshape(1, -1)).cpu().numpy()
-    #     else:
-    #         iou = None
-
-    #     assert len(img_metas) == 1
-    #     for i, result_dict in enumerate(bbox_list):
-    #         result_dict['pts_bbox'] = bbox_pts[i]
-    #         result_dict['iou'] = iou
-    #         result_dict['pred_occupancy'] = pred_occupancy_category
-    #         result_dict['index'] = img_metas[0]['index']
-    #     return bbox_list
-
-
     def simple_test(self,
                     points,
                     img_metas,
@@ -640,287 +556,63 @@ class FBOCC(CenterPoint):
         """Test function without augmentaiton."""
         results = self.extract_feat(
             points, img=img, img_metas=img_metas, **kwargs)
+        
 
         bbox_list = [dict() for _ in range(len(img_metas))]
-
-        if self.with_pts_bbox:
+        
+        if  self.with_pts_bbox:
             bbox_pts = self.simple_test_pts(results['img_bev_feat'], img_metas, rescale=rescale)
         else:
             bbox_pts = [None for _ in range(len(img_metas))]
 
+
         if self.with_specific_component('occupancy_head'):
-            # 获取包含所有信号的occ结果
-            occ_res = self.occupancy_head(
-                results['img_bev_feat_inst_refined'],
-                results=results,
-                hardness_pred=results.get('bev_hardness'),
-                scene_hardness_pred=results.get('scene_hardness'),
-                visible_mask=visible_mask[0] if visible_mask[0] is not None else None,
-                **kwargs
-            )
+            pred_occupancy = self.occupancy_head(results['img_bev_feat'], results=results, **kwargs)['output_voxels'][0]
+            #pred_occupancy = self.occupancy_head(results['img_bev_feat_inst_refined'], results=results, **kwargs)['output_voxels'][0]
 
-            pred_occupancy = occ_res['output_voxels'][0]
 
-            # 原始occupancy处理逻辑
-            pred_occupancy = pred_occupancy.permute(0, 2, 3, 4, 1)[0]  # [H, W, D, C]
+            pred_occupancy = pred_occupancy.permute(0, 2, 3, 4, 1)[0]
             if self.fix_void:
-                pred_occupancy = pred_occupancy[..., 1:]
-            pred_occupancy = pred_occupancy.softmax(-1)  # [H, W, D, C]
+                pred_occupancy = pred_occupancy[..., 1:]     
+            pred_occupancy = pred_occupancy.softmax(-1)
+
 
             # convert to CVPR2023 Format
-            pred_occupancy = pred_occupancy.permute(3, 2, 0, 1)  # [C, D, H, W]
-            pred_occupancy = torch.flip(pred_occupancy, [2])  # 上下翻转 [C, D, H, W]
-            pred_occupancy = torch.rot90(pred_occupancy, -1, [2, 3])  # 旋转-90度 [C, D, H, W]
-            pred_occupancy = pred_occupancy.permute(2, 3, 1, 0)  # [H, W, D, C]
-
+            pred_occupancy = pred_occupancy.permute(3, 2, 0, 1)
+            pred_occupancy = torch.flip(pred_occupancy, [2])
+            pred_occupancy = torch.rot90(pred_occupancy, -1, [2, 3])
+            pred_occupancy = pred_occupancy.permute(2, 3, 1, 0)
+            
             if return_raw_occ:
                 pred_occupancy_category = pred_occupancy
             else:
-                pred_occupancy_category = pred_occupancy.argmax(-1)
+                pred_occupancy_category = pred_occupancy.argmax(-1) 
+            
 
-            pred_occupancy_category = pred_occupancy_category.cpu().numpy()
+            # # do not change the order
+            # if self.occupancy_save_path is not None:
+            #     scene_name = img_metas[0]['scene_name']
+            #     sample_token = img_metas[0]['sample_idx']
+            #     mask_camera = visible_mask[0][0]
+            #     masked_pred_occupancy = pred_occupancy[mask_camera].cpu().numpy()
+            #     save_path = os.path.join(self.occupancy_save_path, 'occupancy_pred', scene_name+'_'+sample_token)
+            #     np.savez_compressed(save_path, pred=masked_pred_occupancy, sample_token=sample_token) 
 
-            # ==================== 定义转换函数 ====================
-            def convert_tensor_to_cvpr_format(tensor, signal_name):
-                """
-                将张量转换为CVPR2023格式
-                注意：occupancy的转换流程是 [H, W, D, C] → [C, D, H, W] → flip → rot90 → [H, W, D, C]
-                """
-                if tensor is None:
-                    return None
 
-                # 确保是numpy格式
-                if torch.is_tensor(tensor):
-                    tensor_np = tensor.detach().cpu().numpy()
-                else:
-                    tensor_np = tensor
-
-                # 获取张量形状和维度
-                original_shape = tensor_np.shape
-                ndim = tensor_np.ndim
-
-                # 根据信号类型和形状确定转换方式
-                if ndim == 3:  # [H, W, D] 格式
-                    # 应用与occupancy相同的空间变换
-                    tensor_np = tensor_np.transpose(2, 0, 1)  # [D, H, W]
-                    tensor_np = np.flip(tensor_np, axis=1)  # 上下翻转
-                    tensor_np = np.rot90(tensor_np, -1, axes=(1, 2))  # 旋转-90度
-                    tensor_np = tensor_np.transpose(1, 2, 0)  # [H, W, D]
-
-                elif ndim == 4:  # 需要判断是 [B, H, W, D], [H, W, D, C], 还是 [C, H, W, D]
-                    if original_shape[0] == 1:  # [1, H, W, D] - 通常是batch维度
-                        # 去掉batch维度，变成 [H, W, D]，然后按照3D处理
-                        tensor_np = tensor_np[0]
-                        tensor_np = tensor_np.transpose(2, 0, 1)  # [D, H, W]
-                        tensor_np = np.flip(tensor_np, axis=1)  # 上下翻转
-                        tensor_np = np.rot90(tensor_np, -1, axes=(1, 2))  # 旋转-90度
-                        tensor_np = tensor_np.transpose(1, 2, 0)  # [H, W, D]
-
-                    elif original_shape[-1] <= 20:  # 假设类别数小于等于20，则是 [H, W, D, C]
-                        # 按照occupancy的转换方式：HWDC → CDHW → flip → rot90 → HWDC
-                        tensor_np = tensor_np.transpose(3, 2, 0, 1)  # [C, D, H, W]
-                        tensor_np = np.flip(tensor_np, axis=2)  # 上下翻转
-                        tensor_np = np.rot90(tensor_np, -1, axes=(2, 3))  # 旋转-90度
-                        tensor_np = tensor_np.transpose(2, 3, 1, 0)  # [H, W, D, C]
-
-                    else:  # 可能是 [C, H, W, D] 或 [B, C, H, W, D] 去掉batch后是 [C, H, W, D]
-                        # 按照CHWD格式转换
-                        tensor_np = tensor_np.transpose(0, 3, 1, 2)  # [C, D, H, W]
-                        tensor_np = np.flip(tensor_np, axis=2)  # 上下翻转
-                        tensor_np = np.rot90(tensor_np, -1, axes=(2, 3))  # 旋转-90度
-                        tensor_np = tensor_np.transpose(2, 3, 1, 0)  # [H, W, D, C]
-
-                else:
-                    print(f"Warning: Unsupported tensor dimension for {signal_name}: {ndim}, shape: {original_shape}")
-                    # 尝试降维处理
-                    if ndim == 5:  # [B, C, H, W, D]
-                        # 取第一个batch，然后按照4D处理
-                        tensor_np = tensor_np[0]
-                        if tensor_np.shape[0] <= 20:  # 如果是类别维度
-                            tensor_np = tensor_np.transpose(0, 3, 1, 2)  # [C, D, H, W]
-                        else:
-                            tensor_np = tensor_np.transpose(1, 3, 2, 0)  # 尝试重新排列
-
-                        tensor_np = np.flip(tensor_np, axis=2)  # 上下翻转
-                        tensor_np = np.rot90(tensor_np, -1, axes=(2, 3))  # 旋转-90度
-                        tensor_np = tensor_np.transpose(2, 3, 1, 0)  # [H, W, D, C]
-
-                return tensor_np
-
-            # ==================== 处理并保存所有信号 ====================
+            # For test server
             if self.occupancy_save_path is not None:
-                scene_name = img_metas[0]['scene_name']
-                sample_token = img_metas[0]['sample_idx']
+                    scene_name = img_metas[0]['scene_name']
+                    sample_token = img_metas[0]['sample_idx']
+                    # mask_camera = visible_mask[0][0]
+                    # masked_pred_occupancy = pred_occupancy[mask_camera].cpu().numpy()
+                    save_pred_occupancy = pred_occupancy.argmax(-1).cpu().numpy()
+                    save_path = os.path.join(self.occupancy_save_path, 'occupancy_pred', f'{sample_token}.npz')
+                    np.savez_compressed(save_path, save_pred_occupancy.astype(np.uint8)) 
 
-                # 1. 保存occupancy预测（原始逻辑）
-                save_pred_occupancy = pred_occupancy.argmax(-1).cpu().numpy()
-                occ_save_path = os.path.join(self.occupancy_save_path, 'occupancy_pred', f'{sample_token}.npz')
-                np.savez_compressed(occ_save_path, save_pred_occupancy.astype(np.uint8))
+            pred_occupancy_category= pred_occupancy_category.cpu().numpy()
 
-                # 2. 创建监控信号保存目录
-                monitor_save_dir = os.path.join(self.occupancy_save_path, 'monitor_signals')
-                os.makedirs(monitor_save_dir, exist_ok=True)
-
-                # ==================== 新增：创建visible信号保存目录 ====================
-                visible_save_dir = os.path.join(self.occupancy_save_path, 'visible_signals')
-                os.makedirs(visible_save_dir, exist_ok=True)
-
-                # 3. 处理并保存各个信号
-                monitor_data = {}
-                visible_monitor_data = {}
-
-                # 处理体素级困难度
-                voxel_hardness = occ_res.get('hardness_pred')
-                if voxel_hardness is not None:
-                    voxel_hardness_cvpr = convert_tensor_to_cvpr_format(voxel_hardness, 'voxel_hardness')
-                    monitor_data['voxel_hardness'] = voxel_hardness_cvpr.astype(np.float32)
-
-                # 处理场景级困难度
-                scene_hardness = occ_res.get('scene_hardness_pred')
-                if scene_hardness is not None:
-                    scene_hardness_cvpr = convert_tensor_to_cvpr_format(scene_hardness, 'scene_hardness')
-                    monitor_data['scene_hardness'] = scene_hardness_cvpr.astype(np.float32)
-
-                # 处理全局困难度
-                global_hardness = occ_res.get('global_hardness')
-                if global_hardness is not None:
-                    global_hardness_cvpr = convert_tensor_to_cvpr_format(global_hardness, 'global_hardness')
-                    monitor_data['global_hardness'] = global_hardness_cvpr.astype(np.float32)
-
-                # 处理损失分布
-                loss_dist = occ_res.get('loss_distribution')
-                if loss_dist is not None:
-                    loss_dist_cvpr = convert_tensor_to_cvpr_format(loss_dist, 'loss_distribution')
-                    monitor_data['loss_distribution'] = loss_dist_cvpr.astype(np.float32)
-
-                # 保存元数据
-                monitor_data['sample_token'] = sample_token
-                monitor_data['scene_name'] = scene_name
-                monitor_data['grid_shape'] = pred_occupancy_category.shape
-
-                # 保存监控信号文件
-                monitor_save_path = os.path.join(monitor_save_dir, f'{sample_token}_signals.npz')
-                np.savez_compressed(monitor_save_path, **monitor_data)
-
-                # ==================== 新增：保存visible监控信号 ====================
-                # 获取visible_monitor_stats
-                visible_monitor_stats = occ_res.get('visible_monitor_stats', {})
-                if visible_monitor_stats:
-                    # 转换numpy类型
-                    def convert_to_serializable(obj):
-                        if isinstance(obj, torch.Tensor):
-                            if obj.numel() == 1:
-                                return obj.cpu().item()
-                            else:
-                                return obj.cpu().numpy()
-                        elif isinstance(obj, (np.ndarray, np.generic)):
-                            return obj.tolist() if hasattr(obj, 'tolist') else obj
-                        else:
-                            return obj
-
-                    for key, value in visible_monitor_stats.items():
-                        visible_monitor_data[key] = convert_to_serializable(value)
-                    
-                    # 添加元数据
-                    visible_monitor_data['sample_token'] = sample_token
-                    visible_monitor_data['scene_name'] = scene_name
-                    
-                    # 保存visible监控信号文件
-                    visible_save_path = os.path.join(visible_save_dir, f'{sample_token}_visible_signals.npz')
-                    np.savez_compressed(visible_save_path, **visible_monitor_data)
-                    
-                    # ==================== 新增：保存visible监控统计为JSON ====================
-                    visible_stats_dir = os.path.join(self.occupancy_save_path, 'visible_stats')
-                    os.makedirs(visible_stats_dir, exist_ok=True)
-                    
-                    # 将统计信息保存为JSON
-                    import json
-                    visible_stats_path = os.path.join(visible_stats_dir, f'{sample_token}_visible_stats.json')
-                    with open(visible_stats_path, 'w') as f:
-                        json.dump(visible_monitor_data, f, indent=2, ensure_ascii=False)
-                    
-                    print(f"Saved visible monitor signals to: {visible_save_path}")
-                    print(f"  Contains: {list(visible_monitor_stats.keys())}")
-
-                # ==================== 新增：保存cam_hardness ====================
-                # 4. 创建cam_hardness保存目录
-                cam_hardness_dir = os.path.join(self.occupancy_save_path, 'cam_hardness')
-                os.makedirs(cam_hardness_dir, exist_ok=True)
-
-                # 获取cam_hardness
-                cam_hardness = results.get('cam_hardness')
-                if cam_hardness is not None:
-                    # cam_hardness维度: [B, N, C, H, W] = [1, 6, 80, 16, 44]
-                    if torch.is_tensor(cam_hardness):
-                        cam_hardness_np = cam_hardness.detach().cpu().numpy()
-                    else:
-                        cam_hardness_np = cam_hardness
-
-                    # 去掉batch维度，保存为 [N, C, H, W] = [6, 80, 16, 44]
-                    if cam_hardness_np.shape[0] == 1:
-                        cam_hardness_np = cam_hardness_np[0]
-
-                    # 保存为.npz文件（与其他信号格式一致）
-                    cam_hardness_npz_path = os.path.join(cam_hardness_dir, f'{sample_token}_cam_hardness.npz')
-                    np.savez_compressed(cam_hardness_npz_path, cam_hardness=cam_hardness_np.astype(np.float32))
-
-                    # 保存cam_hardness的统计信息
-                    cam_hardness_stats = {
-                        'sample_token': sample_token,
-                        'scene_name': scene_name,
-                        'shape': cam_hardness_np.shape,
-                        'mean_per_camera': cam_hardness_np.mean(axis=(1, 2, 3)).tolist(),
-                        'std_per_camera': cam_hardness_np.std(axis=(1, 2, 3)).tolist(),
-                        'min_per_camera': cam_hardness_np.min(axis=(1, 2, 3)).tolist(),
-                        'max_per_camera': cam_hardness_np.max(axis=(1, 2, 3)).tolist(),
-                    }
-
-                    # 保存统计信息到JSON
-                    import json
-                    cam_stats_path = os.path.join(cam_hardness_dir, f'{sample_token}_cam_stats.json')
-                    with open(cam_stats_path, 'w') as f:
-                        json.dump(cam_hardness_stats, f, indent=2, ensure_ascii=False)
-
-                # 5. 保存统计信号为JSON文件
-                monitor_stats = occ_res.get('monitor_stats', {})
-                if monitor_stats:
-                    import json
-                    stats_save_dir = os.path.join(self.occupancy_save_path, 'monitor_stats')
-                    os.makedirs(stats_save_dir, exist_ok=True)
-
-                    # 添加元数据到统计
-                    monitor_stats['sample_token'] = sample_token
-                    monitor_stats['scene_name'] = scene_name
-                    monitor_stats['grid_shape'] = pred_occupancy_category.shape
-                    monitor_stats['timestamp'] = img_metas[0].get('timestamp', 'unknown')
-
-                    # 转换numpy类型为Python原生类型
-                    def convert_to_serializable(obj):
-                        if isinstance(obj, np.ndarray):
-                            return obj.tolist()
-                        elif isinstance(obj, (np.integer, np.floating)):
-                            return obj.item()
-                        elif isinstance(obj, torch.Tensor):
-                            return obj.cpu().item() if obj.numel() == 1 else obj.cpu().tolist()
-                        else:
-                            return obj
-
-                    serializable_stats = {
-                        k: convert_to_serializable(v) for k, v in monitor_stats.items()
-                    }
-
-                    stats_save_path = os.path.join(stats_save_dir, f'{sample_token}_stats.json')
-                    with open(stats_save_path, 'w') as f:
-                        json.dump(serializable_stats, f, indent=2, ensure_ascii=False)
-
-                    # 也保存为npz格式
-                    npz_stats_path = os.path.join(stats_save_dir, f'{sample_token}_stats.npz')
-                    np.savez_compressed(npz_stats_path, **serializable_stats)
-
-                    print(f"Saved monitor stats to: {stats_save_path}")
-
-                print(f"Saved monitor signals to: {monitor_save_path}")
-                print(f"  Contains: {list(monitor_data.keys())}")
+        else:
+            pred_occupancy_category =  None
 
         if results.get('bev_mask_logit', None) is not None:
             pred_bev_mask = results['bev_mask_logit'].sigmoid() > 0.5
@@ -932,10 +624,318 @@ class FBOCC(CenterPoint):
         for i, result_dict in enumerate(bbox_list):
             result_dict['pts_bbox'] = bbox_pts[i]
             result_dict['iou'] = iou
-            result_dict['pred_occupancy'] = pred_occupancy_category if 'pred_occupancy_category' in locals() else None
+            result_dict['pred_occupancy'] = pred_occupancy_category
             result_dict['index'] = img_metas[0]['index']
-
         return bbox_list
+
+
+    # def simple_test(self,
+    #                 points,
+    #                 img_metas,
+    #                 img=None,
+    #                 rescale=False,
+    #                 visible_mask=[None],
+    #                 return_raw_occ=False,
+    #                 **kwargs):
+    #     """Test function without augmentaiton."""
+    #     results = self.extract_feat(
+    #         points, img=img, img_metas=img_metas, **kwargs)
+
+    #     bbox_list = [dict() for _ in range(len(img_metas))]
+
+    #     if self.with_pts_bbox:
+    #         bbox_pts = self.simple_test_pts(results['img_bev_feat'], img_metas, rescale=rescale)
+    #     else:
+    #         bbox_pts = [None for _ in range(len(img_metas))]
+
+    #     if self.with_specific_component('occupancy_head'):
+    #         # 获取包含所有信号的occ结果
+    #         occ_res = self.occupancy_head(
+    #             results['img_bev_feat_inst_refined'],
+    #             results=results,
+    #             hardness_pred=results.get('bev_hardness'),
+    #             scene_hardness_pred=results.get('scene_hardness'),
+    #             visible_mask=visible_mask[0] if visible_mask[0] is not None else None,
+    #             **kwargs
+    #         )
+
+    #         pred_occupancy = occ_res['output_voxels'][0]
+
+    #         # 原始occupancy处理逻辑
+    #         pred_occupancy = pred_occupancy.permute(0, 2, 3, 4, 1)[0]  # [H, W, D, C]
+    #         if self.fix_void:
+    #             pred_occupancy = pred_occupancy[..., 1:]
+    #         pred_occupancy = pred_occupancy.softmax(-1)  # [H, W, D, C]
+
+    #         # convert to CVPR2023 Format
+    #         pred_occupancy = pred_occupancy.permute(3, 2, 0, 1)  # [C, D, H, W]
+    #         pred_occupancy = torch.flip(pred_occupancy, [2])  # 上下翻转 [C, D, H, W]
+    #         pred_occupancy = torch.rot90(pred_occupancy, -1, [2, 3])  # 旋转-90度 [C, D, H, W]
+    #         pred_occupancy = pred_occupancy.permute(2, 3, 1, 0)  # [H, W, D, C]
+
+    #         if return_raw_occ:
+    #             pred_occupancy_category = pred_occupancy
+    #         else:
+    #             pred_occupancy_category = pred_occupancy.argmax(-1)
+
+    #         pred_occupancy_category = pred_occupancy_category.cpu().numpy()
+
+    #         # ==================== 定义转换函数 ====================
+    #         def convert_tensor_to_cvpr_format(tensor, signal_name):
+    #             """
+    #             将张量转换为CVPR2023格式
+    #             注意：occupancy的转换流程是 [H, W, D, C] → [C, D, H, W] → flip → rot90 → [H, W, D, C]
+    #             """
+    #             if tensor is None:
+    #                 return None
+
+    #             # 确保是numpy格式
+    #             if torch.is_tensor(tensor):
+    #                 tensor_np = tensor.detach().cpu().numpy()
+    #             else:
+    #                 tensor_np = tensor
+
+    #             # 获取张量形状和维度
+    #             original_shape = tensor_np.shape
+    #             ndim = tensor_np.ndim
+
+    #             # 根据信号类型和形状确定转换方式
+    #             if ndim == 3:  # [H, W, D] 格式
+    #                 # 应用与occupancy相同的空间变换
+    #                 tensor_np = tensor_np.transpose(2, 0, 1)  # [D, H, W]
+    #                 tensor_np = np.flip(tensor_np, axis=1)  # 上下翻转
+    #                 tensor_np = np.rot90(tensor_np, -1, axes=(1, 2))  # 旋转-90度
+    #                 tensor_np = tensor_np.transpose(1, 2, 0)  # [H, W, D]
+
+    #             elif ndim == 4:  # 需要判断是 [B, H, W, D], [H, W, D, C], 还是 [C, H, W, D]
+    #                 if original_shape[0] == 1:  # [1, H, W, D] - 通常是batch维度
+    #                     # 去掉batch维度，变成 [H, W, D]，然后按照3D处理
+    #                     tensor_np = tensor_np[0]
+    #                     tensor_np = tensor_np.transpose(2, 0, 1)  # [D, H, W]
+    #                     tensor_np = np.flip(tensor_np, axis=1)  # 上下翻转
+    #                     tensor_np = np.rot90(tensor_np, -1, axes=(1, 2))  # 旋转-90度
+    #                     tensor_np = tensor_np.transpose(1, 2, 0)  # [H, W, D]
+
+    #                 elif original_shape[-1] <= 20:  # 假设类别数小于等于20，则是 [H, W, D, C]
+    #                     # 按照occupancy的转换方式：HWDC → CDHW → flip → rot90 → HWDC
+    #                     tensor_np = tensor_np.transpose(3, 2, 0, 1)  # [C, D, H, W]
+    #                     tensor_np = np.flip(tensor_np, axis=2)  # 上下翻转
+    #                     tensor_np = np.rot90(tensor_np, -1, axes=(2, 3))  # 旋转-90度
+    #                     tensor_np = tensor_np.transpose(2, 3, 1, 0)  # [H, W, D, C]
+
+    #                 else:  # 可能是 [C, H, W, D] 或 [B, C, H, W, D] 去掉batch后是 [C, H, W, D]
+    #                     # 按照CHWD格式转换
+    #                     tensor_np = tensor_np.transpose(0, 3, 1, 2)  # [C, D, H, W]
+    #                     tensor_np = np.flip(tensor_np, axis=2)  # 上下翻转
+    #                     tensor_np = np.rot90(tensor_np, -1, axes=(2, 3))  # 旋转-90度
+    #                     tensor_np = tensor_np.transpose(2, 3, 1, 0)  # [H, W, D, C]
+
+    #             else:
+    #                 print(f"Warning: Unsupported tensor dimension for {signal_name}: {ndim}, shape: {original_shape}")
+    #                 # 尝试降维处理
+    #                 if ndim == 5:  # [B, C, H, W, D]
+    #                     # 取第一个batch，然后按照4D处理
+    #                     tensor_np = tensor_np[0]
+    #                     if tensor_np.shape[0] <= 20:  # 如果是类别维度
+    #                         tensor_np = tensor_np.transpose(0, 3, 1, 2)  # [C, D, H, W]
+    #                     else:
+    #                         tensor_np = tensor_np.transpose(1, 3, 2, 0)  # 尝试重新排列
+
+    #                     tensor_np = np.flip(tensor_np, axis=2)  # 上下翻转
+    #                     tensor_np = np.rot90(tensor_np, -1, axes=(2, 3))  # 旋转-90度
+    #                     tensor_np = tensor_np.transpose(2, 3, 1, 0)  # [H, W, D, C]
+
+    #             return tensor_np
+
+    #         # ==================== 处理并保存所有信号 ====================
+    #         if self.occupancy_save_path is not None:
+    #             scene_name = img_metas[0]['scene_name']
+    #             sample_token = img_metas[0]['sample_idx']
+
+    #             # 1. 保存occupancy预测（原始逻辑）
+    #             save_pred_occupancy = pred_occupancy.argmax(-1).cpu().numpy()
+    #             occ_save_path = os.path.join(self.occupancy_save_path, 'occupancy_pred', f'{sample_token}.npz')
+    #             np.savez_compressed(occ_save_path, save_pred_occupancy.astype(np.uint8))
+
+    #             # 2. 创建监控信号保存目录
+    #             monitor_save_dir = os.path.join(self.occupancy_save_path, 'monitor_signals')
+    #             os.makedirs(monitor_save_dir, exist_ok=True)
+
+    #             # ==================== 新增：创建visible信号保存目录 ====================
+    #             visible_save_dir = os.path.join(self.occupancy_save_path, 'visible_signals')
+    #             os.makedirs(visible_save_dir, exist_ok=True)
+
+    #             # 3. 处理并保存各个信号
+    #             monitor_data = {}
+    #             visible_monitor_data = {}
+
+    #             # 处理体素级困难度
+    #             voxel_hardness = occ_res.get('hardness_pred')
+    #             if voxel_hardness is not None:
+    #                 voxel_hardness_cvpr = convert_tensor_to_cvpr_format(voxel_hardness, 'voxel_hardness')
+    #                 monitor_data['voxel_hardness'] = voxel_hardness_cvpr.astype(np.float32)
+
+    #             # 处理场景级困难度
+    #             scene_hardness = occ_res.get('scene_hardness_pred')
+    #             if scene_hardness is not None:
+    #                 scene_hardness_cvpr = convert_tensor_to_cvpr_format(scene_hardness, 'scene_hardness')
+    #                 monitor_data['scene_hardness'] = scene_hardness_cvpr.astype(np.float32)
+
+    #             # 处理全局困难度
+    #             global_hardness = occ_res.get('global_hardness')
+    #             if global_hardness is not None:
+    #                 global_hardness_cvpr = convert_tensor_to_cvpr_format(global_hardness, 'global_hardness')
+    #                 monitor_data['global_hardness'] = global_hardness_cvpr.astype(np.float32)
+
+    #             # 处理损失分布
+    #             loss_dist = occ_res.get('loss_distribution')
+    #             if loss_dist is not None:
+    #                 loss_dist_cvpr = convert_tensor_to_cvpr_format(loss_dist, 'loss_distribution')
+    #                 monitor_data['loss_distribution'] = loss_dist_cvpr.astype(np.float32)
+
+    #             # 保存元数据
+    #             monitor_data['sample_token'] = sample_token
+    #             monitor_data['scene_name'] = scene_name
+    #             monitor_data['grid_shape'] = pred_occupancy_category.shape
+
+    #             # 保存监控信号文件
+    #             monitor_save_path = os.path.join(monitor_save_dir, f'{sample_token}_signals.npz')
+    #             np.savez_compressed(monitor_save_path, **monitor_data)
+
+    #             # ==================== 新增：保存visible监控信号 ====================
+    #             # 获取visible_monitor_stats
+    #             visible_monitor_stats = occ_res.get('visible_monitor_stats', {})
+    #             if visible_monitor_stats:
+    #                 # 转换numpy类型
+    #                 def convert_to_serializable(obj):
+    #                     if isinstance(obj, torch.Tensor):
+    #                         if obj.numel() == 1:
+    #                             return obj.cpu().item()
+    #                         else:
+    #                             return obj.cpu().numpy()
+    #                     elif isinstance(obj, (np.ndarray, np.generic)):
+    #                         return obj.tolist() if hasattr(obj, 'tolist') else obj
+    #                     else:
+    #                         return obj
+
+    #                 for key, value in visible_monitor_stats.items():
+    #                     visible_monitor_data[key] = convert_to_serializable(value)
+                    
+    #                 # 添加元数据
+    #                 visible_monitor_data['sample_token'] = sample_token
+    #                 visible_monitor_data['scene_name'] = scene_name
+                    
+    #                 # 保存visible监控信号文件
+    #                 visible_save_path = os.path.join(visible_save_dir, f'{sample_token}_visible_signals.npz')
+    #                 np.savez_compressed(visible_save_path, **visible_monitor_data)
+                    
+    #                 # ==================== 新增：保存visible监控统计为JSON ====================
+    #                 visible_stats_dir = os.path.join(self.occupancy_save_path, 'visible_stats')
+    #                 os.makedirs(visible_stats_dir, exist_ok=True)
+                    
+    #                 # 将统计信息保存为JSON
+    #                 import json
+    #                 visible_stats_path = os.path.join(visible_stats_dir, f'{sample_token}_visible_stats.json')
+    #                 with open(visible_stats_path, 'w') as f:
+    #                     json.dump(visible_monitor_data, f, indent=2, ensure_ascii=False)
+                    
+    #                 print(f"Saved visible monitor signals to: {visible_save_path}")
+    #                 print(f"  Contains: {list(visible_monitor_stats.keys())}")
+
+    #             # ==================== 新增：保存cam_hardness ====================
+    #             # 4. 创建cam_hardness保存目录
+    #             cam_hardness_dir = os.path.join(self.occupancy_save_path, 'cam_hardness')
+    #             os.makedirs(cam_hardness_dir, exist_ok=True)
+
+    #             # 获取cam_hardness
+    #             cam_hardness = results.get('cam_hardness')
+    #             if cam_hardness is not None:
+    #                 # cam_hardness维度: [B, N, C, H, W] = [1, 6, 80, 16, 44]
+    #                 if torch.is_tensor(cam_hardness):
+    #                     cam_hardness_np = cam_hardness.detach().cpu().numpy()
+    #                 else:
+    #                     cam_hardness_np = cam_hardness
+
+    #                 # 去掉batch维度，保存为 [N, C, H, W] = [6, 80, 16, 44]
+    #                 if cam_hardness_np.shape[0] == 1:
+    #                     cam_hardness_np = cam_hardness_np[0]
+
+    #                 # 保存为.npz文件（与其他信号格式一致）
+    #                 cam_hardness_npz_path = os.path.join(cam_hardness_dir, f'{sample_token}_cam_hardness.npz')
+    #                 np.savez_compressed(cam_hardness_npz_path, cam_hardness=cam_hardness_np.astype(np.float32))
+
+    #                 # 保存cam_hardness的统计信息
+    #                 cam_hardness_stats = {
+    #                     'sample_token': sample_token,
+    #                     'scene_name': scene_name,
+    #                     'shape': cam_hardness_np.shape,
+    #                     'mean_per_camera': cam_hardness_np.mean(axis=(1, 2, 3)).tolist(),
+    #                     'std_per_camera': cam_hardness_np.std(axis=(1, 2, 3)).tolist(),
+    #                     'min_per_camera': cam_hardness_np.min(axis=(1, 2, 3)).tolist(),
+    #                     'max_per_camera': cam_hardness_np.max(axis=(1, 2, 3)).tolist(),
+    #                 }
+
+    #                 # 保存统计信息到JSON
+    #                 import json
+    #                 cam_stats_path = os.path.join(cam_hardness_dir, f'{sample_token}_cam_stats.json')
+    #                 with open(cam_stats_path, 'w') as f:
+    #                     json.dump(cam_hardness_stats, f, indent=2, ensure_ascii=False)
+
+    #             # 5. 保存统计信号为JSON文件
+    #             monitor_stats = occ_res.get('monitor_stats', {})
+    #             if monitor_stats:
+    #                 import json
+    #                 stats_save_dir = os.path.join(self.occupancy_save_path, 'monitor_stats')
+    #                 os.makedirs(stats_save_dir, exist_ok=True)
+
+    #                 # 添加元数据到统计
+    #                 monitor_stats['sample_token'] = sample_token
+    #                 monitor_stats['scene_name'] = scene_name
+    #                 monitor_stats['grid_shape'] = pred_occupancy_category.shape
+    #                 monitor_stats['timestamp'] = img_metas[0].get('timestamp', 'unknown')
+
+    #                 # 转换numpy类型为Python原生类型
+    #                 def convert_to_serializable(obj):
+    #                     if isinstance(obj, np.ndarray):
+    #                         return obj.tolist()
+    #                     elif isinstance(obj, (np.integer, np.floating)):
+    #                         return obj.item()
+    #                     elif isinstance(obj, torch.Tensor):
+    #                         return obj.cpu().item() if obj.numel() == 1 else obj.cpu().tolist()
+    #                     else:
+    #                         return obj
+
+    #                 serializable_stats = {
+    #                     k: convert_to_serializable(v) for k, v in monitor_stats.items()
+    #                 }
+
+    #                 stats_save_path = os.path.join(stats_save_dir, f'{sample_token}_stats.json')
+    #                 with open(stats_save_path, 'w') as f:
+    #                     json.dump(serializable_stats, f, indent=2, ensure_ascii=False)
+
+    #                 # 也保存为npz格式
+    #                 npz_stats_path = os.path.join(stats_save_dir, f'{sample_token}_stats.npz')
+    #                 np.savez_compressed(npz_stats_path, **serializable_stats)
+
+    #                 print(f"Saved monitor stats to: {stats_save_path}")
+
+    #             print(f"Saved monitor signals to: {monitor_save_path}")
+    #             print(f"  Contains: {list(monitor_data.keys())}")
+
+    #     if results.get('bev_mask_logit', None) is not None:
+    #         pred_bev_mask = results['bev_mask_logit'].sigmoid() > 0.5
+    #         iou = IOU(pred_bev_mask.reshape(1, -1), kwargs['gt_bev_mask'][0].reshape(1, -1)).cpu().numpy()
+    #     else:
+    #         iou = None
+
+    #     assert len(img_metas) == 1
+    #     for i, result_dict in enumerate(bbox_list):
+    #         result_dict['pts_bbox'] = bbox_pts[i]
+    #         result_dict['iou'] = iou
+    #         result_dict['pred_occupancy'] = pred_occupancy_category if 'pred_occupancy_category' in locals() else None
+    #         result_dict['index'] = img_metas[0]['index']
+
+    #     return bbox_list
 
 
 
@@ -968,20 +968,42 @@ class FBOCC(CenterPoint):
         return outs
 
     @force_fp32()
-    def process_instance_fusion(self, bev_feat, context, bev_hardness, img_metas, return_map):
+    def process_instance_fusion(self, bev_feat, context, bev_hardness, img_metas, return_map, gt_occupancy):
+        """处理实例融合的逻辑 - 改进版"""
         bs = bev_feat.shape[0]
 
-        B, C, H, W, D = bev_feat.shape
+        # 获取BEV特征维度
+        B, C, H, W, D = bev_feat.shape  # B=2, H=100, W=100, D=8
 
-        # 根据困难度筛选困难体素特征
+        # 1. 根据可见性掩码筛选困难体素特征
         if bev_hardness is not None:
+            # 下采样gt_occupancy到与bev_hardness相同尺寸的可见性掩码
+            # gt_occupancy形状: [2, 200, 200, 16] -> 下采样到 [2, 100, 100, 8]
+            visible_mask = (gt_occupancy != 255).float()  # 1表示可见，0表示不可见(255)
+
+            # 下采样visible_mask到[2, 100, 100, 8]
+            visible_mask_down = visible_mask.permute(0, 3, 1, 2).float()  # [2, 16, 200, 200]
+            visible_mask_down = F.avg_pool2d(visible_mask_down, kernel_size=2, stride=2)  # [2, 16, 100, 100]
+
+            # 深度维度下采样: 16 -> 8
+            if visible_mask_down.shape[1] == 16:
+                visible_mask_down = visible_mask_down.reshape(B, 8, 2, 100, 100).mean(dim=2)
+
+            visible_mask_down = (visible_mask_down > 0.1).float()
+            visible_mask_down = visible_mask_down.permute(0, 2, 3, 1)  # [2, 100, 100, 8]
+
             # 将特征和困难度展平
             hardness_flat = bev_hardness.reshape(B, -1, 1)  # [B, H*W*D, 1]
+            visible_flat = visible_mask_down.reshape(B, -1, 1)  # [B, H*W*D, 1]
             bev_feat_flat = bev_feat.permute(0, 2, 3, 4, 1).reshape(B, -1, C)  # [B, H*W*D, C]
 
-            # 选择困难度最高的N个体素
+            # 只考虑可见区域: 将不可见区域的困难度设为极小值
+            masked_hardness = hardness_flat.clone()
+            masked_hardness[visible_flat.squeeze(-1) < 0.5] = -1e6  # 不可见区域设为极小值
+
+            # 选择可见区域内困难度最高的N个体素
             topk_hardness, topk_indices = torch.topk(
-                hardness_flat.squeeze(-1),
+                masked_hardness.squeeze(-1),
                 k=min(1500, hardness_flat.shape[1]),
                 dim=1
             )
