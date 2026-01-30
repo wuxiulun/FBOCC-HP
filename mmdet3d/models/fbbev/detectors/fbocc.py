@@ -392,7 +392,7 @@ class FBOCC(CenterPoint):
 
         if self.instance_fusion is not None:
             bev_feat_inst_refined = self.process_instance_fusion(
-                bev_feat, context, bev_hardness.detach(), img_metas, return_map)
+                bev_feat, context, bev_hardness.detach(), img_metas, return_map, gt_occupancy = kwargs['gt_occupancy'])
 
         with torch.no_grad():
             bev_feat = self.bev_encoder(bev_feat)
@@ -978,6 +978,12 @@ class FBOCC(CenterPoint):
         # 1. 根据可见性掩码筛选困难体素特征
         if bev_hardness is not None:
             # 下采样gt_occupancy到与bev_hardness相同尺寸的可见性掩码
+
+            # 处理不同的 gt_occupancy 输入类型
+            if isinstance(gt_occupancy, list):
+                # 测试时：gt_occupancy 是列表，提取第一个元素
+                gt_occupancy = gt_occupancy[0]
+            
             # gt_occupancy形状: [2, 200, 200, 16] -> 下采样到 [2, 100, 100, 8]
             visible_mask = (gt_occupancy != 255).float()  # 1表示可见，0表示不可见(255)
 
