@@ -984,6 +984,9 @@ class FBOCC(CenterPoint):
                 # 测试时：gt_occupancy 是列表，提取第一个元素
                 gt_occupancy = gt_occupancy[0]
             
+            if gt_occupancy is not None:
+                gt_occupancy = gt_occupancy.detach()
+
             # gt_occupancy形状: [2, 200, 200, 16] -> 下采样到 [2, 100, 100, 8]
             visible_mask = (gt_occupancy != 255).float()  # 1表示可见，0表示不可见(255)
 
@@ -1005,7 +1008,7 @@ class FBOCC(CenterPoint):
 
             # 只考虑可见区域: 将不可见区域的困难度设为极小值
             masked_hardness = hardness_flat.clone()
-            masked_hardness[visible_flat.squeeze(-1) < 0.5] = -1e6  # 不可见区域设为极小值
+            masked_hardness[visible_flat.squeeze(-1) < 0.5] = 0  # 不可见区域设为极小值
 
             # 选择可见区域内困难度最高的N个体素
             topk_hardness, topk_indices = torch.topk(

@@ -6,7 +6,7 @@
 
 
 # we follow the online training settings  from solofusion
-num_gpus = 7
+num_gpus = 1
 samples_per_gpu = 2
 num_iters_per_epoch = int(28130 // (num_gpus * samples_per_gpu) * 4.554)
 num_epochs = 30
