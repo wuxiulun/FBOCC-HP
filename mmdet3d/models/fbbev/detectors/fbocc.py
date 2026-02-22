@@ -978,7 +978,7 @@ class FBOCC(CenterPoint):
 
             global_topk_indices = torch.topk(
                 hardness_flat.squeeze(-1),
-                k=min(3000, hardness_flat.shape[1]),
+                k=min(2000, hardness_flat.shape[1]),
                 dim=1
             )[1]
 
