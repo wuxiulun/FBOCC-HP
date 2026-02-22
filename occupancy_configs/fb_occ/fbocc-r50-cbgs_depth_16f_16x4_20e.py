@@ -6,7 +6,7 @@
 
 
 # we follow the online training settings  from solofusion
-num_gpus = 1
+num_gpus = 6
 samples_per_gpu = 2
 num_iters_per_epoch = int(28130 // (num_gpus * samples_per_gpu) * 4.554)
 num_epochs = 30
@@ -70,7 +70,7 @@ bda_aug_conf = dict(
     flip_dx_ratio=0.5,
     flip_dy_ratio=0.5)
 
-use_checkpoint = False
+use_checkpoint = True
 sync_bn = True
 
 
@@ -406,7 +406,7 @@ custom_hooks = [
         type='MEGVIIEMAHook',
         init_updates=10560,
         priority='NORMAL',
-        interval=2*num_iters_per_epoch,
+        interval=1*num_iters_per_epoch,
     ),
     dict(
         type='SequentialControlHook',

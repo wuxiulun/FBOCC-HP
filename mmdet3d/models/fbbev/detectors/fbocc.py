@@ -969,67 +969,73 @@ class FBOCC(CenterPoint):
 
     @force_fp32()
     def process_instance_fusion(self, bev_feat, context, bev_hardness, img_metas, return_map, gt_occupancy):
-        """处理实例融合的逻辑 - 改进版"""
         bs = bev_feat.shape[0]
+        B, C, H, W, D = bev_feat.shape
 
-        # 获取BEV特征维度
-        B, C, H, W, D = bev_feat.shape  # B=2, H=100, W=100, D=8
-
-        # 1. 根据可见性掩码筛选困难体素特征
         if bev_hardness is not None:
-            # 下采样gt_occupancy到与bev_hardness相同尺寸的可见性掩码
+            hardness_flat = bev_hardness.reshape(B, -1, 1)
+            bev_feat_flat = bev_feat.permute(0, 2, 3, 4, 1).reshape(B, -1, C)
 
-            # 处理不同的 gt_occupancy 输入类型
-            if isinstance(gt_occupancy, list):
-                # 测试时：gt_occupancy 是列表，提取第一个元素
-                gt_occupancy = gt_occupancy[0]
-            
-            if gt_occupancy is not None:
-                gt_occupancy = gt_occupancy.detach()
-
-            # gt_occupancy形状: [2, 200, 200, 16] -> 下采样到 [2, 100, 100, 8]
-            visible_mask = (gt_occupancy != 255).float()  # 1表示可见，0表示不可见(255)
-
-            # 下采样visible_mask到[2, 100, 100, 8]
-            visible_mask_down = visible_mask.permute(0, 3, 1, 2).float()  # [2, 16, 200, 200]
-            visible_mask_down = F.avg_pool2d(visible_mask_down, kernel_size=2, stride=2)  # [2, 16, 100, 100]
-
-            # 深度维度下采样: 16 -> 8
-            if visible_mask_down.shape[1] == 16:
-                visible_mask_down = visible_mask_down.reshape(B, 8, 2, 100, 100).mean(dim=2)
-
-            visible_mask_down = (visible_mask_down > 0.1).float()
-            visible_mask_down = visible_mask_down.permute(0, 2, 3, 1)  # [2, 100, 100, 8]
-
-            # 将特征和困难度展平
-            hardness_flat = bev_hardness.reshape(B, -1, 1)  # [B, H*W*D, 1]
-            visible_flat = visible_mask_down.reshape(B, -1, 1)  # [B, H*W*D, 1]
-            bev_feat_flat = bev_feat.permute(0, 2, 3, 4, 1).reshape(B, -1, C)  # [B, H*W*D, C]
-
-            # 只考虑可见区域: 将不可见区域的困难度设为极小值
-            masked_hardness = hardness_flat.clone()
-            masked_hardness[visible_flat.squeeze(-1) < 0.5] = 0  # 不可见区域设为极小值
-
-            # 选择可见区域内困难度最高的N个体素
-            topk_hardness, topk_indices = torch.topk(
-                masked_hardness.squeeze(-1),
-                k=min(1500, hardness_flat.shape[1]),
+            global_topk_indices = torch.topk(
+                hardness_flat.squeeze(-1),
+                k=min(3000, hardness_flat.shape[1]),
                 dim=1
-            )
+            )[1]
 
-            # 提取初始困难体素特征
+            visible_topk_indices = None
+            if gt_occupancy is not None:
+                if isinstance(gt_occupancy, list):
+                    gt_occupancy = gt_occupancy[0]
+                gt_occ = gt_occupancy.detach()
+                visible_mask = (gt_occ != 255).float()
+                visible_mask_down = visible_mask.permute(0, 3, 1, 2).float()
+                visible_mask_down = F.avg_pool2d(visible_mask_down, kernel_size=2, stride=2)
+                
+                if visible_mask_down.shape[1] == 16:
+                    visible_mask_down = visible_mask_down.reshape(B, 8, 2, 100, 100).mean(dim=2)
+                
+                visible_mask_down = (visible_mask_down > 0.1).float()
+                visible_mask_down = visible_mask_down.permute(0, 2, 3, 1)
+                visible_flat = visible_mask_down.reshape(B, -1, 1)
+                
+                masked_hardness = hardness_flat.clone()
+                masked_hardness[visible_flat.squeeze(-1) < 0.5] = 0
+                
+                visible_topk_indices = torch.topk(
+                    masked_hardness.squeeze(-1),
+                    k=min(500, hardness_flat.shape[1]),
+                    dim=1
+                )[1]
+
+            if visible_topk_indices is not None:
+                combined_indices_list = []
+                for i in range(B):
+                    global_set = set(global_topk_indices[i].cpu().numpy())
+                    visible_set = set(visible_topk_indices[i].cpu().numpy())
+                    union_set = global_set.union(visible_set)
+                    union_tensor = torch.tensor(list(union_set), device=bev_feat.device, dtype=torch.long)
+                    combined_indices_list.append(union_tensor)
+                
+                max_len = max([t.shape[0] for t in combined_indices_list])
+                topk_indices = torch.zeros(B, max_len, device=bev_feat.device, dtype=torch.long)
+                
+                for i, idx in enumerate(combined_indices_list):
+                    topk_indices[i, :idx.shape[0]] = idx
+                
+                print(f"Union indices count: {topk_indices.shape[1]}")
+            else:
+                topk_indices = global_topk_indices
+
             initial_hard_voxel_feat = torch.gather(
                 bev_feat_flat,
                 dim=1,
                 index=topk_indices.unsqueeze(-1).expand(-1, -1, C)
-            )  # [B, M, C]
-
+            )
         else:
-            enhanced_hard_voxel_feat = None
+            initial_hard_voxel_feat = None
             bev_feat_flat = None
             topk_indices = None
 
-        # 处理历史实例（保持不变）
         start_of_sequence = torch.BoolTensor([
             single_img_metas['start_of_sequence']
             for single_img_metas in img_metas]).to(bev_feat.device)
@@ -1044,7 +1050,6 @@ class FBOCC(CenterPoint):
 
         history_inst_queries = self.history_instances.clone()
 
-        # 实例融合 - 梯度保持
         fused_global_inst, updated_history_inst, final_enhanced_voxel, camera_instances = self.instance_fusion(
             context=context,
             hard_voxel_feat=initial_hard_voxel_feat,
@@ -1053,9 +1058,7 @@ class FBOCC(CenterPoint):
 
         self.history_instances = updated_history_inst.detach()
 
-        # 关键修改：梯度保持的特征替换
         if final_enhanced_voxel is not None and initial_hard_voxel_feat is not None:
-            # scatter操作
             bev_feat_flat_combined = bev_feat_flat.scatter(
                 dim=1,
                 index=topk_indices.unsqueeze(-1).expand(-1, -1, C),
@@ -1067,7 +1070,6 @@ class FBOCC(CenterPoint):
         else:
             bev_feat_refined = bev_feat
 
-        # 保存结果
         return_map['fused_global_instances'] = fused_global_inst
         return_map['camera_instances'] = camera_instances
         return_map['updated_history_instances'] = updated_history_inst

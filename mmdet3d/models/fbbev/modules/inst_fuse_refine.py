@@ -11,12 +11,12 @@ import torch.utils.checkpoint as cp
 
 @HEADS.register_module()
 class MultiScaleInstanceFusionModule(BaseModule):
-    def __init__(self, embed_dims=80, num_global_instances=100,
+    def __init__(self, embed_dims=80, num_global_instances=135,
                  num_heads=8, num_points=4,
                  # 各尺度的instance数量
-                 scale1_instances_per_camera=20,  # 原尺寸 (16×44),30
-                 scale2_instances_per_camera=8,  # 1/2尺寸 (8×22)
-                 scale3_instances_per_camera=5,  # 1/4尺寸 (4×11)
+                 scale1_instances_per_camera=30,  # 原尺寸 (16×44),30
+                 scale2_instances_per_camera=15,  # 1/2尺寸 (8×22)
+                 scale3_instances_per_camera=10,  # 1/4尺寸 (4×11)
                  use_multi_scale=True,
                  with_cp=True,
                  ):
